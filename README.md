@@ -108,6 +108,9 @@ The Discord `/health` command reports the total size of the local cache and
 the watchdog process's current memory usage (RSS). The command is registered
 for the configured `GUILD_ID` on startup.
 
+The Discord `/status` command reports the latest cached status, check time,
+latency, and errors for each monitored bot.
+
 The `/status` and `/status/:botId` responses can get large (roughly 1-1.5 MB
 per bot at a 1-minute check interval); the server gzips responses over 1 KB
 when the client sends `Accept-Encoding: gzip`.
