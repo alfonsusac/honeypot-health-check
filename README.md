@@ -1,23 +1,35 @@
+Vibe coded using copilot
+
 # honeypot-health-check
 
-Lightweight Discord **watchdog** bot that monitors whether your main bot is
-still online — without invoking its commands, spoofing interactions, or
-assuming it will respond to anything. Built with Bun + TypeScript.
+Lightweight Discord **watchdog** bot that monitors whether one or more bots
+are still online — without invoking their commands, spoofing interactions,
+or assuming they'll respond to anything. Built with Bun + TypeScript.
 
 ## How it decides status
 
-1. **Primary: presence / member state.** The watchdog fetches the main bot's
-   guild member and reads its Discord presence (`online`/`idle`/`dnd`/`offline`).
-   This is read-only and works for any bot, regardless of whether you control
-   its code.
-2. **Secondary (optional): custom health message.** If `HEALTH_CHANNEL_ID` is
-   set, the watchdog will send `!health-check:<nonce>` and wait briefly for a
-   reply from `MAIN_BOT_ID`. This is **only useful if the main bot is
-   explicitly coded to reply** — if it isn't, a missing reply is treated as
-   "no signal", not proof of an outage. It is never used to invoke slash
-   commands or impersonate a user.
+The watchdog fetches guild-member + presence data (`online`/`idle`/`dnd`/`offline`)
+for all monitored bots in a **single** guild members request per check cycle.
+This is read-only and works for any bot, regardless of whether you control
+its code — no messages sent, no commands invoked, no impersonation.
 
-No database is used — results are cached to a local JSON file.
+No database is used — results are cached to local JSON files.
+
+## Monitoring multiple bots
+
+Bots to monitor are configured directly in [src/lib/config.ts](src/lib/config.ts)
+via the `botTargets` map — key is the bot's user ID, value is the channel ID
+to `@everyone`-ping when that specific bot goes offline:
+
+```ts
+export const botTargets: Record<string, string> = {
+  "1450060292716494940": "1550031498839588874", // bot A -> alert channel
+  "9999999999999999999": "8888888888888888888", // bot B -> a different channel
+};
+```
+
+All monitored bots are checked together in one API call per interval. Each
+bot gets its own cached history and its own alert channel.
 
 ## Folder structure
 
@@ -27,43 +39,47 @@ honeypot-health-check/
 ├── tsconfig.json
 ├── .env.example
 ├── cache/
-│   └── latest.json        # created at runtime: { latest, history, updated_at }
+│   ├── latest.json                 # { bots: { [botId]: HealthCheckResult }, updated_at }
+│   └── history/
+│       └── <botId>/
+│           ├── 2026-09-17.json      # one file per calendar day (UTC), per bot
+│           └── 2026-09-16.json
 └── src/
-    ├── config.ts           # env var loading/validation
-    ├── types.ts             # shared types
-    ├── bot.ts               # discord.js client setup
-    ├── healthcheck.ts       # presence + optional custom-message logic
-    ├── cache.ts             # JSON cache read/write/retention
-    ├── server.ts            # HTTP API (Bun.serve)
-    └── index.ts             # wires everything together
+    ├── index.ts                    # wires everything together, check loop, alerts
+    └── lib/
+        ├── config.ts               # env vars + the botTargets map
+        ├── types.ts                # shared types
+        ├── bot.ts                  # discord.js client setup
+        ├── healthcheck.ts          # batched presence check for all bots
+        ├── cache.ts                # per-bot/per-day JSON cache + retention
+        └── server.ts               # HTTP API (Bun.serve)
 ```
 
 ## Environment variables
 
 See [.env.example](.env.example):
 
-| Variable            | Required | Description                                               |
-| -------------------- | -------- | ----------------------------------------------------------- |
-| `DISCORD_TOKEN`       | yes      | Token for **this watchdog bot** (a separate bot application) |
-| `GUILD_ID`            | yes      | Server ID where the main bot lives                          |
-| `MAIN_BOT_ID`         | yes      | User ID of the main bot being monitored                     |
-| `HEALTH_CHANNEL_ID`   | no       | Channel for the optional custom health-check message         |
-| `LOG_CHANNEL_ID`      | no       | Channel to post status summaries to                          |
-| `CHECK_INTERVAL_MS`   | no       | Interval between checks (default `60000`)                    |
-| `TIMEOUT_MS`          | no       | How long to wait for a custom-message reply (default `5000`) |
-| `PORT`                | no       | HTTP API port (default `3000`)                               |
+| Variable            | Required | Description                                    |
+| -------------------- | -------- | ------------------------------------------------ |
+| `DISCORD_TOKEN`       | yes      | Token for **this watchdog bot**                   |
+| `GUILD_ID`            | yes      | Server ID where the monitored bots live            |
+| `CHECK_INTERVAL_MS`   | no       | Interval between checks (default `60000`)          |
+| `PORT`                | no       | HTTP API port (default `3000`)                     |
+
+Which bots to monitor, and which channel each alerts to, is configured in
+`botTargets` in [src/lib/config.ts](src/lib/config.ts) — not env vars.
 
 ## Discord setup
 
 1. Create a **separate** bot application in the
    [Discord Developer Portal](https://discord.com/developers/applications) —
-   don't reuse the main bot's token.
+   don't reuse any monitored bot's token.
 2. Under **Bot > Privileged Gateway Intents**, enable:
    - `Presence Intent`
    - `Server Members Intent`
-   - `Message Content Intent` (only needed if you use the optional custom message)
-3. Invite the watchdog bot to the same guild as the main bot with at minimum
-   `View Channels` and `Send Messages` (if using log/health channels).
+3. Invite the watchdog bot to the same guild as the monitored bots with at
+   minimum `View Channels`, `Send Messages`, and `Mention @everyone` on the
+   alert channels.
 
 ## Local development
 
@@ -73,9 +89,17 @@ cp .env.example .env   # fill in values
 bun run dev
 ```
 
+- `GET http://localhost:3000/` — plain-text list of endpoints
 - `GET http://localhost:3000/health` — liveness probe
-- `GET http://localhost:3000/status` — latest check result
-- `GET http://localhost:3000/history?limit=20` — recent checks (newest first)
+- `GET http://localhost:3000/bots` — list all registered bot IDs
+- `GET http://localhost:3000/status` — latest + last 5 days of history, **all bots**
+- `GET http://localhost:3000/status/:botId` — latest + last 7 days of history, **one bot**
+- `GET http://localhost:3000/status/:botId/page/:number` — one calendar day of
+  history (page `0` = today, `1` = yesterday, ...)
+
+The `/status` and `/status/:botId` responses can get large (roughly 1-1.5 MB
+per bot at a 1-minute check interval); the server gzips responses over 1 KB
+when the client sends `Accept-Encoding: gzip`.
 
 ## VPS deployment
 
@@ -127,10 +151,7 @@ pm2 save
 
 ## Notes on safety / policy compliance
 
-- Never invokes the main bot's slash commands or fakes interaction payloads.
+- Never invokes any monitored bot's slash commands or fakes interaction payloads.
 - Never impersonates a user or self-bots.
-- The custom health-check message is opt-in, best-effort, and only produces a
-  signal if the main bot's own code chooses to reply — the watchdog makes no
-  assumptions otherwise.
 - All monitoring is based on data Discord already exposes to any bot in the
   guild (member list, presence).

@@ -1,85 +1,94 @@
-import type { Client, Guild, GuildMember } from "discord.js";
-import { config } from "./config";
+import type { Client, Guild } from "discord.js";
 import type { HealthCheckResult } from "./types";
 
 /**
- * Look up the main bot's guild member + presence.
- * This never sends any messages or fakes interactions — it just reads state
- * Discord already exposes to any bot with the (privileged) presence intent.
+ * Looks up presence for multiple bots in a single guild members fetch — one
+ * API call regardless of how many bots are monitored. Read-only: never sends
+ * any messages or fakes interactions.
  */
-async function check_presence(client: Client, guildId: string, mainBotId: string) {
-  const start = Date.now();
-
-  let guild: Guild;
-  if (client.guilds.cache.has(guildId)) {
-    guild = client.guilds.cache.get(guildId)!;
-  } else {
-    guild = await client.guilds.fetch(guildId);
-  }
-
-  const member: GuildMember = await guild.members.fetch(mainBotId);
-  const latencyMs = Date.now() - start;
-  const presenceStatus = member.presence?.status ?? null;
-
-  return { presenceStatus, latencyMs };
-}
-
-
-
-export async function perform_health_check(
+export async function perform_health_checks(
   client: Client,
-  previousLastSeen: string | null,
-): Promise<HealthCheckResult> {
+  guildId: string,
+  botIds: string[],
+  previousLastSeen: Record<string, string | null>,
+): Promise<Record<string, HealthCheckResult>> {
   const timestamp = new Date().toISOString();
+  const results: Record<string, HealthCheckResult> = {};
 
   try {
-    const { presenceStatus, latencyMs } = await check_presence(
-      client,
-      config.guildId,
-      config.mainBotId,
-    );
-
-    if (presenceStatus && presenceStatus !== "offline") {
-      return {
-        status: "online",
-        last_seen: timestamp,
-        latency_ms: latencyMs,
-        error: null,
-        timestamp,
-        method: "presence",
-      };
+    let guild: Guild;
+    if (client.guilds.cache.has(guildId)) {
+      guild = client.guilds.cache.get(guildId)!;
+    } else {
+      guild = await client.guilds.fetch(guildId);
     }
 
-    if (presenceStatus === "offline") {
-      return {
-        status: "offline",
-        last_seen: previousLastSeen,
-        latency_ms: latencyMs,
-        error: null,
-        timestamp,
-        method: "presence",
-      };
-    }
+    const start = Date.now();
+    const members = await guild.members.fetch({ user: botIds });
+    const latencyMs = Date.now() - start;
 
-    // Member found but no presence data available (e.g. presence intent not
-    // fully populated yet). Not enough signal to call it online or offline.
-    return {
-      status: "unknown",
-      last_seen: previousLastSeen,
-      latency_ms: latencyMs,
-      error: "member found but no presence data available",
-      timestamp,
-      method: "presence",
-    };
+    for (const botId of botIds) {
+      const member = members.get(botId);
+
+      if (!member) {
+        results[botId] = {
+          status: "offline",
+          last_seen: previousLastSeen[botId] ?? null,
+          latency_ms: latencyMs,
+          error: "bot not found in guild",
+          timestamp,
+          method: "presence",
+        };
+        continue;
+      }
+
+      const presenceStatus = member.presence?.status ?? null;
+
+      if (presenceStatus && presenceStatus !== "offline") {
+        results[botId] = {
+          status: "online",
+          last_seen: timestamp,
+          latency_ms: latencyMs,
+          error: null,
+          timestamp,
+          method: "presence",
+        };
+      } else if (presenceStatus === "offline") {
+        results[botId] = {
+          status: "offline",
+          last_seen: previousLastSeen[botId] ?? null,
+          latency_ms: latencyMs,
+          error: null,
+          timestamp,
+          method: "presence",
+        };
+      } else {
+        // Member found but no presence data available (e.g. presence intent not
+        // fully populated yet). Not enough signal to call it online or offline.
+        results[botId] = {
+          status: "unknown",
+          last_seen: previousLastSeen[botId] ?? null,
+          latency_ms: latencyMs,
+          error: "member found but no presence data available",
+          timestamp,
+          method: "presence",
+        };
+      }
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return {
-      status: "offline",
-      last_seen: previousLastSeen,
-      latency_ms: null,
-      error: `presence check failed: ${message}`,
-      timestamp,
-      method: "presence",
-    };
+    for (const botId of botIds) {
+      results[botId] = {
+        status: "offline",
+        last_seen: previousLastSeen[botId] ?? null,
+        latency_ms: null,
+        error: `presence check failed: ${message}`,
+        timestamp,
+        method: "presence",
+      };
+    }
   }
+
+  return results;
 }
+

@@ -1,3 +1,5 @@
+import { botTargets } from "../config";
+
 function required(name: string): string {
   const value = process.env[name];
   if (!value) {
@@ -18,17 +20,18 @@ function int(name: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+const isProduction = process.env.NODE_ENV === "production";
+
 export const config = {
   discordToken: required("DISCORD_TOKEN"),
   guildId: required("GUILD_ID"),
-  mainBotId: required("MAIN_BOT_ID"),
-  // Optional: custom health-check message is only sent if this is set,
-  // and only works if the main bot is explicitly coded to reply to it.
-  healthChannelId: optional("HEALTH_CHANNEL_ID"),
-  logChannelId: optional("LOG_CHANNEL_ID"),
   checkIntervalMs: int("CHECK_INTERVAL_MS", 60_000),
-  timeoutMs: int("TIMEOUT_MS", 5_000),
   port: int("PORT", 3000),
+  isProduction,
+  // Keep startup and status alerts separate per environment so local dev runs
+  // don't spam the real channel.
+  logChannelId: isProduction ? optional("LOG_CHANNEL_ID_PROD") : optional("LOG_CHANNEL_ID_DEV"),
   retentionDays: 30,
-  maxHistoryEntries: 500,
+  botTargets,
+  botIds: botTargets,
 } as const;
