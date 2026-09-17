@@ -92,6 +92,10 @@ cp .env.example .env   # fill in values
 bun run dev
 ```
 
+Development does not require Docker. Run it directly with Bun so `bun --watch`
+reloads the TypeScript source as you edit it. The `dev` script uses
+`NODE_ENV=development` and therefore uses `LOG_CHANNEL_ID_DEV`.
+
 - `GET http://localhost:3000/` — plain-text list of endpoints
 - `GET http://localhost:3000/health` — liveness probe
 - `GET http://localhost:3000/bots` — list all registered bot IDs
@@ -104,7 +108,32 @@ The `/status` and `/status/:botId` responses can get large (roughly 1-1.5 MB
 per bot at a 1-minute check interval); the server gzips responses over 1 KB
 when the client sends `Accept-Encoding: gzip`.
 
-## VPS deployment
+## Docker production deployment
+
+Docker is configured for production only; it is not needed for local
+development. The image runs the watchdog with Bun, while the Compose bind
+mount keeps `cache/` and its health history on the host across container
+rebuilds or replacements.
+
+```bash
+# on the VPS
+git clone https://github.com/alfonsusac/honeypot-health-check.git honeypot-health-check
+cd honeypot-health-check
+cp .env.example .env   # fill in values, including production channel ID
+docker compose pull
+docker compose up -d
+docker compose logs -f
+```
+
+Every push to `main` publishes a new image to GitHub Container Registry. After
+the workflow completes, update the VPS with `docker compose pull && docker
+compose up -d`. If the repository or package is private, authenticate first
+with `docker login ghcr.io` using a GitHub token that can read packages.
+
+The API is available on the configured `PORT` (default `3000`). Stop it with
+`docker compose down`; the host `cache/` directory is left intact.
+
+## VPS deployment without Docker
 
 ```bash
 # on the VPS

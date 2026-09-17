@@ -1,0 +1,13 @@
+services:
+  honeypot-health-check:
+    image: ghcr.io/alfonsusac/honeypot-health-check:latest
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+    ports:
+      - "${PORT:-3000}:${PORT:-3000}"
+    volumes:
+      - ./cache:/app/cache
+    init: true
+    restart: unless-stopped
