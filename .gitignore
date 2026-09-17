@@ -1,7 +1,6 @@
 node_modules/
 .env
 cache/*.json
+cache/*
 !cache/.gitkeep
 *.log
-
-cache/history/1450060292716494940/2026-09-17.json
