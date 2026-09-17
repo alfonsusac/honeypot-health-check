@@ -97,12 +97,105 @@ reloads the TypeScript source as you edit it. The `dev` script uses
 `NODE_ENV=development` and therefore uses `LOG_CHANNEL_ID_DEV`.
 
 - `GET http://localhost:3000/` — plain-text list of endpoints
-- `GET http://localhost:3000/health` — liveness probe
-- `GET http://localhost:3000/bots` — list all registered bot IDs
-- `GET http://localhost:3000/status` — latest + last 5 days of history, **all bots**
-- `GET http://localhost:3000/status/:botId` — latest + last 7 days of history, **one bot**
-- `GET http://localhost:3000/status/:botId/page/:number` — one calendar day of
-  history (page `0` = today, `1` = yesterday, ...)
+- `GET http://localhost:3000/health` — liveness probe; returns `HealthResponse`
+- `GET http://localhost:3000/bots` — monitored IDs; returns `BotsResponse`
+- `GET http://localhost:3000/status` — latest + last 5 days of history for all bots; returns `AllBotsStatusResponse`
+- `GET http://localhost:3000/status/:botId` — latest + last 7 days of history for one bot; returns `BotStatusResponse`
+- `GET http://localhost:3000/status/:botId/page/:number` — one calendar day of raw checks; returns `StatusPageResponse`
+
+Replace `:botId` with a real configured bot ID. The page number is zero-based:
+`0` is today, `1` is yesterday, and so on. Successful JSON responses use HTTP
+`200`. Unknown bot IDs return HTTP `404` with `{ error: string }`.
+
+### API response types
+
+These TypeScript types match the JSON responses and can be copied into a client:
+
+```ts
+type HealthStatus = "online" | "offline" | "stale" | "unknown";
+
+type HealthCheckResult = {
+   status: HealthStatus;
+   last_seen: string | null;
+   latency_ms: number | null;
+   error: string | null;
+   timestamp: string;
+   method: "presence";
+};
+
+type HourlyBucket = {
+   hour: string;
+   total: number;
+   online: number;
+   offline: number;
+   unknown: number;
+   uptime_pct: number;
+   had_offline: boolean;
+};
+
+type HealthResponse = {
+   ok: boolean;
+   uptime_s: number;
+};
+
+type BotsResponse = {
+   bots: string[];
+};
+
+type AllBotsStatusResponse = {
+   days: number;
+   bots: Record<string, {
+      latest: HealthCheckResult | null;
+      hourly: HourlyBucket[];
+   }>;
+};
+
+type BotStatusResponse = {
+   bot_id: string;
+   days: number;
+   latest: HealthCheckResult | null;
+   count: number;
+   hourly: HourlyBucket[];
+};
+
+type StatusPageResponse = {
+   bot_id: string;
+   page: number;
+   date: string;
+   count: number;
+   results: HealthCheckResult[];
+};
+
+type ApiError = {
+   error: string;
+};
+```
+
+### Copy-paste fetch examples
+
+`fetch()` returns a `Response`, so call `.json()` on it. In TypeScript, the
+type assertion belongs after parsing the JSON:
+
+```ts
+const health = await fetch("http://localhost:3000/health")
+   .then((response) => response.json() as Promise<HealthResponse>);
+
+const bots = await fetch("http://localhost:3000/bots")
+   .then((response) => response.json() as Promise<BotsResponse>);
+
+const allStatus = await fetch("http://localhost:3000/status")
+   .then((response) => response.json() as Promise<AllBotsStatusResponse>);
+
+const botId = "1450060292716494940";
+const botStatus = await fetch(`http://localhost:3000/status/${botId}`)
+   .then((response) => response.json() as Promise<BotStatusResponse>);
+
+const page = 0;
+const botDay = await fetch(`http://localhost:3000/status/${botId}/page/${page}`)
+   .then((response) => response.json() as Promise<StatusPageResponse>);
+```
+
+For production, replace `http://localhost:3000` with the VPS URL or domain.
 
 The Discord `/health` command reports the total size of the local cache and
 the watchdog process's current memory usage (RSS). The command is registered
