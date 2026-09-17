@@ -78,8 +78,11 @@ Which bots to monitor, and which channel each alerts to, is configured in
    - `Presence Intent`
    - `Server Members Intent`
 3. Invite the watchdog bot to the same guild as the monitored bots with at
-   minimum `View Channels`, `Send Messages`, and `Mention @everyone` on the
-   alert channels.
+   minimum `View Channels`, `Send Messages`, and the Discord permission
+   **Mention @everyone, @here, and All Roles** on the alert channels. Check
+   both the server role permissions and any channel-specific permission
+   overrides; without this permission, Discord will not deliver the
+   `@everyone` ping even though the bot sends it with `allowedMentions`.
 
 ## Local development
 
