@@ -8,7 +8,7 @@
   "scripts": {
     "start": "NODE_ENV=production bun run src/index.ts",
     "dev": "NODE_ENV=development bun --watch run src/index.ts",
-    "update-deploy": "git pull origin main && docker compose pull && docker compose up -d && docker compose ps && docker compose logs -f",
+    "deploy": "git pull origin main && docker compose pull && docker compose up -d && docker compose ps && docker compose logs -f",
     "typecheck": "bun x tsc --noEmit"
   },
   "dependencies": {
