@@ -104,6 +104,10 @@ reloads the TypeScript source as you edit it. The `dev` script uses
 - `GET http://localhost:3000/status/:botId/page/:number` — one calendar day of
   history (page `0` = today, `1` = yesterday, ...)
 
+The Discord `/health` command reports the total size of the local cache and
+the watchdog process's current memory usage (RSS). The command is registered
+for the configured `GUILD_ID` on startup.
+
 The `/status` and `/status/:botId` responses can get large (roughly 1-1.5 MB
 per bot at a 1-minute check interval); the server gzips responses over 1 KB
 when the client sends `Accept-Encoding: gzip`.

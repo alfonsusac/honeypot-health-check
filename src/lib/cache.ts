@@ -99,6 +99,17 @@ export async function get_latest_all(): Promise<Record<string, HealthCheckResult
   return latest.bots;
 }
 
+export async function get_cache_size_bytes(): Promise<number> {
+  let total = 0;
+  const glob = new Bun.Glob("**/*");
+
+  for await (const name of glob.scan({ cwd: CACHE_DIR.pathname, onlyFiles: true })) {
+    total += Bun.file(new URL(name, CACHE_DIR)).size;
+  }
+
+  return total;
+}
+
 export async function get_latest_for(botId: string): Promise<HealthCheckResult | null> {
   const latest = await read_latest();
   return latest.bots[botId] ?? null;
