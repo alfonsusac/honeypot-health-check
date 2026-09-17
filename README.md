@@ -98,7 +98,7 @@ reloads the TypeScript source as you edit it. The `dev` script uses
 
 - `GET http://localhost:3000/` — plain-text list of endpoints
 - `GET http://localhost:3000/health` — liveness probe; returns `HealthResponse`
-- `GET http://localhost:3000/bots` — monitored IDs; returns `BotsResponse`
+- `GET http://localhost:3000/bots` — current Discord profiles for monitored bots; returns `BotsResponse`
 - `GET http://localhost:3000/status` — latest + last 5 days of history for all bots; returns `AllBotsStatusResponse`
 - `GET http://localhost:3000/status/:botId` — latest + last 7 days of history for one bot; returns `BotStatusResponse`
 - `GET http://localhost:3000/status/:botId/page/:number` — one calendar day of raw checks; returns `StatusPageResponse`
@@ -139,7 +139,14 @@ type HealthResponse = {
 };
 
 type BotsResponse = {
-   bots: string[];
+   bots: Array<{
+      id: string;
+      display_name: string | null;
+      username: string;
+      tag: string;
+      icon: string | null;
+      error?: string;
+   }>;
 };
 
 type AllBotsStatusResponse = {

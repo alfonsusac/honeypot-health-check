@@ -1,4 +1,5 @@
 import { config } from "./config";
+import { get_monitored_bot_profiles } from "./bot";
 import { get_day_page, get_hourly_history, get_latest_all, get_latest_for } from "./cache";
 
 const ENDPOINTS_TEXT = `honeypot-health-check API
@@ -57,7 +58,7 @@ export function start_server() {
       }
 
       if (url.pathname === "/bots") {
-        return json({ bots: config.botIds }, 200, req);
+        return json({ bots: await get_monitored_bot_profiles() }, 200, req);
       }
 
       if (url.pathname === "/status") {

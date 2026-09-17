@@ -15,6 +15,37 @@ export const client = new Client({
   partials: [ Partials.GuildMember ],
 })
 
+export async function get_monitored_bot_profiles(): Promise<Array<{
+  id: string
+  display_name: string | null
+  username: string
+  tag: string
+  icon: string | null
+  error?: string
+}>> {
+  return Promise.all(config.botIds.map(async (id) => {
+    try {
+      const user = await client.users.fetch(id)
+      return {
+        id: user.id,
+        display_name: user.globalName,
+        username: user.username,
+        tag: user.tag,
+        icon: user.displayAvatarURL({ extension: "png", size: 256 }),
+      }
+    } catch (error) {
+      return {
+        id,
+        display_name: null,
+        username: "",
+        tag: "",
+        icon: null,
+        error: error instanceof Error ? error.message : String(error),
+      }
+    }
+  }))
+}
+
 const health_command = new SlashCommandBuilder()
   .setName("health")
   .setDescription("Show this watchdog's cache and memory usage")
