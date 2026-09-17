@@ -120,6 +120,9 @@ rebuilds or replacements.
 git clone https://github.com/alfonsusac/honeypot-health-check.git honeypot-health-check
 cd honeypot-health-check
 cp .env.example .env   # fill in values, including production channel ID
+mkdir -p cache
+# The image runs as Bun user 1000 and must be able to write the bind-mounted cache.
+sudo chown -R 1000:1000 cache
 docker compose pull
 docker compose up -d
 docker compose logs -f
