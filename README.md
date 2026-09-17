@@ -17,19 +17,22 @@ No database is used — results are cached to local JSON files.
 
 ## Monitoring multiple bots
 
-Bots to monitor are configured directly in [src/lib/config.ts](src/lib/config.ts)
-via the `botTargets` map — key is the bot's user ID, value is the channel ID
-to `@everyone`-ping when that specific bot goes offline:
+Bots to monitor are configured directly in [src/config.ts](src/config.ts) via
+the `botTargets` map. Each key is a bot's Discord user ID and each value stores
+the bot author and support server:
 
 ```ts
-export const botTargets: Record<string, string> = {
-  "1450060292716494940": "1550031498839588874", // bot A -> alert channel
-  "9999999999999999999": "8888888888888888888", // bot B -> a different channel
+export const botTargets: Record<string, { author: string; support_server: string }> = {
+   "1450060292716494940": {
+      author: "author name",
+      support_server: "https://discord.gg/example",
+   },
 };
 ```
 
-All monitored bots are checked together in one API call per interval. Each
-bot gets its own cached history and its own alert channel.
+All monitored bots are checked together in one API call per interval. Each bot
+gets its own cached history. Leave `support_server` empty when a bot has no
+public support server.
 
 ## Folder structure
 
@@ -145,6 +148,8 @@ type BotsResponse = {
       username: string;
       tag: string;
       icon: string | null;
+      author: string;
+      support_server: string;
       error?: string;
    }>;
 };

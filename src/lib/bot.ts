@@ -21,9 +21,12 @@ export async function get_monitored_bot_profiles(): Promise<Array<{
   username: string
   tag: string
   icon: string | null
+  author: string
+  support_server: string
   error?: string
 }>> {
   return Promise.all(config.botIds.map(async (id) => {
+    const metadata = config.botTargets[id]!
     try {
       const user = await client.users.fetch(id)
       return {
@@ -32,6 +35,8 @@ export async function get_monitored_bot_profiles(): Promise<Array<{
         username: user.username,
         tag: user.tag,
         icon: user.displayAvatarURL({ extension: "png", size: 256 }),
+        author: metadata.author,
+        support_server: metadata.support_server,
       }
     } catch (error) {
       return {
@@ -40,6 +45,8 @@ export async function get_monitored_bot_profiles(): Promise<Array<{
         username: "",
         tag: "",
         icon: null,
+        author: metadata.author,
+        support_server: metadata.support_server,
         error: error instanceof Error ? error.message : String(error),
       }
     }

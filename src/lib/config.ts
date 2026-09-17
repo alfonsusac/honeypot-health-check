@@ -33,5 +33,5 @@ export const config = {
   logChannelId: isProduction ? optional("LOG_CHANNEL_ID_PROD") : optional("LOG_CHANNEL_ID_DEV"),
   retentionDays: 30,
   botTargets,
-  botIds: botTargets,
+  botIds: Object.keys(botTargets),
 } as const;
