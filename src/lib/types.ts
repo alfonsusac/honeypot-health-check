@@ -34,7 +34,7 @@ export interface WatchdogStatus {
   hourly: WatchdogHourlyBucket[];
 }
 
-/** A point where a bot's status changed; holds until the next mark (or now, for the last one). */
+/** A point where a bot's status changed; holds until the next mark (or now, for the last one). Unknown means watchdog coverage was unavailable. */
 export interface StatusMark {
   status: HealthStatus;
   time: string;

@@ -10,3 +10,8 @@ export const botTargets: Record<string, {
   "1436973163211657278": { author: "giftedly", support_server: "https://discord.gg/PczBt78", ping: true },
   "1549993724249899098": { author: "alfon", support_server: "", ping: true },
 }
+export const watchdogConfig = {
+  heartbeatIntervalMs: 150_000,
+  heartbeatGraceMs: 5_000,
+  bucketDurationMs: 30 * 1000,
+} as const;

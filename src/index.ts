@@ -12,9 +12,8 @@ async function main() {
   start_server()
   console.log(`[server] listening on port ${ config.port }`)
 
-  // Run once immediately, then on the configured interval — watchdog self-heartbeat only;
-  // bot status now comes purely from the presenceUpdate event.
-  await run_check_loop()
+  // First heartbeat fires from the clientReady handler (before presence data is read);
+  // this just keeps the interval going afterward.
   setInterval(() => {
     run_check_loop().catch((err) => console.error("[healthcheck] loop error:", err))
   }, config.checkIntervalMs)

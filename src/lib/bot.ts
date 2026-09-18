@@ -1,7 +1,7 @@
 import { Client, GatewayIntentBits, Partials, SlashCommandBuilder } from "discord.js"
 import type { Interaction, Presence } from "discord.js"
 import { config } from "./config"
-import { get_cache_size_bytes, get_latest_all } from "./cache"
+import { append_watchdog_heartbeat, get_cache_size_bytes, get_latest_all } from "./cache"
 import { get_runtime_memory } from "./runtime"
 import type { HealthCheckResult } from "./types"
 
@@ -176,7 +176,10 @@ export async function start_bot(
   client.once("clientReady", (readyClient) => {
     console.log(`[bot] logged in as ${ readyClient.user.tag }`)
     register_commands()
-    get_initial_bot_statuses()
+    // Heartbeat closes the prior gap *before* any presence data is read, so
+    // presence marks never land inside an unknown window.
+    append_watchdog_heartbeat()
+      .then(() => get_initial_bot_statuses())
       .then(on_ready)
       .catch((error) => console.error("[bot] failed to seed initial bot statuses:", error))
   })
