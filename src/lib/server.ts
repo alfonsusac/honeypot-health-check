@@ -1,14 +1,15 @@
 import { config } from "./config";
 import { get_monitored_bot_profiles } from "./bot";
-import { get_day_page, get_hourly_history, get_latest_all, get_latest_for } from "./cache";
+import { get_day_page, get_latest_all, get_latest_for, get_status_timeline, get_watchdog_status } from "./cache";
 
 const ENDPOINTS_TEXT = `honeypot-health-check API
 
 GET /                              this list
 GET /health                        liveness probe
-GET /bots                          list all registered bot IDs
-GET /status                        latest + last ${5} days, hourly rollup, all bots
-GET /status/:botId                 latest + last ${7} days, hourly rollup, one bot
+GET /bots                          bot profiles
+GET /watchdog                      watchdog heartbeat status, last ${5} days
+GET /status                        latest + uptime % + status timeline, last ${5} days, all bots
+GET /status/:botId                 latest + uptime % + status timeline, last ${7} days, one bot
 GET /status/:botId/page/:number    one calendar day of raw checks (0 = today, 1 = yesterday, ...)
 `;
 
@@ -61,14 +62,20 @@ export function start_server() {
         return json({ bots: await get_monitored_bot_profiles() }, 200, req);
       }
 
+      if (url.pathname === "/watchdog") {
+        return json(await get_watchdog_status(STATUS_ALL_DAYS), 200, req);
+      }
+
       if (url.pathname === "/status") {
         const latest = await get_latest_all();
-        const bots: Record<string, { latest: unknown; hourly: Awaited<ReturnType<typeof get_hourly_history>> }> = {};
+        const bots: Record<string, { latest: unknown; uptime_pct: number; timeline: Awaited<ReturnType<typeof get_status_timeline>>["timeline"] }> = {};
 
         for (const botId of config.botIds) {
+          const { uptime_pct, timeline } = await get_status_timeline(botId, STATUS_ALL_DAYS);
           bots[botId] = {
             latest: latest[botId] ?? null,
-            hourly: await get_hourly_history(botId, STATUS_ALL_DAYS),
+            uptime_pct,
+            timeline,
           };
         }
 
@@ -96,9 +103,9 @@ export function start_server() {
         }
 
         const latest = await get_latest_for(botId);
-        const hourly = await get_hourly_history(botId, STATUS_BOT_DAYS);
+        const { uptime_pct, timeline } = await get_status_timeline(botId, STATUS_BOT_DAYS);
         return json(
-          { bot_id: botId, days: STATUS_BOT_DAYS, latest, count: hourly.length, hourly },
+          { bot_id: botId, days: STATUS_BOT_DAYS, latest, uptime_pct, timeline },
           200,
           req,
         );

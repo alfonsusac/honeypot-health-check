@@ -73,11 +73,11 @@ See [.env.example](.env.example):
 | -------------------- | -------- | ------------------------------------------------ |
 | `DISCORD_TOKEN`       | yes      | Token for **this watchdog bot**                   |
 | `GUILD_ID`            | yes      | Server ID where the monitored bots live            |
-| `CHECK_INTERVAL_MS`   | no       | Interval between checks (default `60000`)          |
+| `CHECK_INTERVAL_MS`   | no       | Interval between checks (default `150000`)         |
 | `PORT`                | no       | HTTP API port (default `3000`)                     |
 
-Which bots to monitor, and which channel each alerts to, is configured in
-`botTargets` in [src/lib/config.ts](src/lib/config.ts) — not env vars.
+Which bots to monitor and whether each one alerts is configured in
+`botTargets` in [src/config.ts](src/config.ts) — not env vars.
 
 ## Discord setup
 
@@ -108,7 +108,7 @@ reloads the TypeScript source as you edit it. The `dev` script uses
 
 - `GET http://localhost:3000/` — plain-text list of endpoints
 - `GET http://localhost:3000/health` — liveness probe; returns `HealthResponse`
-- `GET http://localhost:3000/bots` — current Discord profiles for monitored bots; returns `BotsResponse`
+- `GET http://localhost:3000/bots` — current Discord profiles plus watchdog heartbeat status; returns `BotsResponse`
 - `GET http://localhost:3000/status` — latest + last 5 days of history for all bots; returns `AllBotsStatusResponse`
 - `GET http://localhost:3000/status/:botId` — latest + last 7 days of history for one bot; returns `BotStatusResponse`
 - `GET http://localhost:3000/status/:botId/page/:number` — one calendar day of raw checks; returns `StatusPageResponse`
@@ -160,6 +160,15 @@ type BotsResponse = {
       ping: boolean;
       error?: string;
    }>;
+   watchdog: {
+      current: "online" | "offline";
+      last_seen: string | null;
+      hourly: Array<{
+         hour: string;
+         heartbeats: number;
+         was_online: boolean;
+      }>;
+   };
 };
 
 type AllBotsStatusResponse = {
@@ -223,6 +232,15 @@ for the configured `GUILD_ID` on startup.
 
 The Discord `/status` command reports the latest cached status, check time,
 latency, and errors for each monitored bot.
+
+The watchdog writes a heartbeat at the start of each check cycle. Its
+`/bots.watchdog.current` status is `online` when the latest heartbeat is within
+`CHECK_INTERVAL_MS`; after the next expected heartbeat is missed, it becomes
+`offline`. Its hourly buckets report `was_online: true` when at least one
+heartbeat was recorded during that hour, and `false` when no heartbeat was
+recorded. Monitored bot presence changes are also handled immediately through
+Discord's Gateway `presenceUpdate` event. The periodic check remains as a
+fallback reconciliation path.
 
 The `/status` and `/status/:botId` responses can get large (roughly 1-1.5 MB
 per bot at a 1-minute check interval); the server gzips responses over 1 KB

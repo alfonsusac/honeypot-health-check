@@ -1,5 +1,11 @@
 import { config } from "./config";
-import type { HealthCheckResult, HourlyBucket, LatestCacheFile } from "./types";
+import type {
+  HealthCheckResult,
+  LatestCacheFile,
+  StatusMark,
+  WatchdogHourlyBucket,
+  WatchdogStatus,
+} from "./types";
 
 const CACHE_DIR = new URL("../../cache/", import.meta.url);
 const LATEST_PATH = new URL("latest.json", CACHE_DIR);
@@ -7,6 +13,7 @@ const HISTORY_DIR = new URL("history/", CACHE_DIR);
 
 const EMPTY_LATEST: LatestCacheFile = {
   bots: {},
+  watchdog: null,
   alerts: {},
   updated_at: new Date(0).toISOString(),
 };
@@ -58,6 +65,7 @@ async function read_latest(): Promise<LatestCacheFile> {
   const latest = await read_json(LATEST_PATH, structuredClone(EMPTY_LATEST));
   // Defensive against cache files written before a field (e.g. `alerts`) existed.
   latest.bots ??= {};
+  latest.watchdog ??= null;
   latest.alerts ??= {};
   return latest;
 }
@@ -94,6 +102,27 @@ export async function append_result(botId: string, result: HealthCheckResult): P
   await purge_old_days(botId);
 }
 
+export async function append_watchdog_heartbeat(timestamp = new Date().toISOString()): Promise<void> {
+  const heartbeat: HealthCheckResult = {
+    status: "online",
+    last_seen: timestamp,
+    latency_ms: null,
+    error: null,
+    timestamp,
+    method: "heartbeat",
+  };
+  const latest = await read_latest();
+  latest.watchdog = heartbeat;
+  latest.updated_at = timestamp;
+  await write_json(LATEST_PATH, CACHE_DIR, latest);
+
+  const today = new Date(timestamp);
+  const dayResults = await read_day("watchdog", today);
+  dayResults.push(heartbeat);
+  await write_json(day_file_path("watchdog", today), bot_history_dir("watchdog"), dayResults);
+  await purge_old_days("watchdog");
+}
+
 export async function get_latest_all(): Promise<Record<string, HealthCheckResult>> {
   const latest = await read_latest();
   return latest.bots;
@@ -113,6 +142,34 @@ export async function get_cache_size_bytes(): Promise<number> {
 export async function get_latest_for(botId: string): Promise<HealthCheckResult | null> {
   const latest = await read_latest();
   return latest.bots[botId] ?? null;
+}
+
+export async function get_watchdog_status(days: number): Promise<WatchdogStatus> {
+  const latest = await read_latest();
+  const lastSeen = latest.watchdog?.timestamp ?? null;
+  const current = lastSeen && Date.now() - new Date(lastSeen).getTime() <= config.checkIntervalMs
+    ? "online"
+    : "offline";
+  const results = await get_recent_days("watchdog", days);
+  const now = new Date();
+  const firstHour = new Date(now);
+  firstHour.setUTCMinutes(0, 0, 0);
+  firstHour.setUTCHours(firstHour.getUTCHours() - (days * 24 - 1));
+  const heartbeatsByHour = new Map<string, number>();
+
+  for (const result of results) {
+    const key = hour_key(result.timestamp);
+    heartbeatsByHour.set(key, (heartbeatsByHour.get(key) ?? 0) + 1);
+  }
+
+  const hourly: WatchdogHourlyBucket[] = [];
+  for (let hour = new Date(firstHour); hour <= now; hour.setUTCHours(hour.getUTCHours() + 1)) {
+    const key = hour.toISOString();
+    const heartbeats = heartbeatsByHour.get(key) ?? 0;
+    hourly.push({ hour: key, heartbeats, was_online: heartbeats > 0 });
+  }
+
+  return { current, last_seen: lastSeen, hourly };
 }
 
 /** Timestamp of the last offline alert sent for a bot, or null if none / never alerted. */
@@ -135,18 +192,18 @@ export async function clear_last_alert(botId: string): Promise<void> {
   await write_json(LATEST_PATH, CACHE_DIR, latest);
 }
 
-/** Merges the last `days` day-files for a bot (today first), newest entries first. */
+/** Merges the last `days` day-files for a bot, oldest entry first (chronological). */
 export async function get_recent_days(botId: string, days: number): Promise<HealthCheckResult[]> {
   const safeDays = Math.min(Math.max(Math.floor(days) || 1, 1), config.retentionDays);
   const today = new Date();
   const results: HealthCheckResult[] = [];
 
-  for (let i = 0; i < safeDays; i++) {
+  for (let i = safeDays - 1; i >= 0; i--) {
     const dayResults = await read_day(botId, day_offset(today, i));
     results.push(...dayResults);
   }
 
-  return results.reverse();
+  return results;
 }
 
 function hour_key(timestamp: string): string {
@@ -155,36 +212,48 @@ function hour_key(timestamp: string): string {
   return date.toISOString();
 }
 
-function aggregate_hourly(results: HealthCheckResult[]): HourlyBucket[] {
-  const buckets = new Map<string, { total: number; online: number; offline: number; unknown: number }>();
-
+/** Collapses chronological entries into marks, one per actual status change. */
+function to_status_marks(results: HealthCheckResult[]): StatusMark[] {
+  const marks: StatusMark[] = [];
   for (const entry of results) {
-    const key = hour_key(entry.timestamp);
-    const bucket = buckets.get(key) ?? { total: 0, online: 0, offline: 0, unknown: 0 };
-    bucket.total += 1;
-    if (entry.status === "online") bucket.online += 1;
-    else if (entry.status === "offline") bucket.offline += 1;
-    else bucket.unknown += 1;
-    buckets.set(key, bucket);
+    const last = marks[marks.length - 1];
+    if (!last || last.status !== entry.status) {
+      marks.push({ status: entry.status, time: entry.timestamp });
+    }
   }
-
-  return [...buckets.entries()]
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([hour, counts]) => ({
-      hour,
-      total: counts.total,
-      online: counts.online,
-      offline: counts.offline,
-      unknown: counts.unknown,
-      uptime_pct: counts.total > 0 ? Math.round((counts.online / counts.total) * 10000) / 100 : 0,
-      had_offline: counts.offline > 0,
-    }));
+  return marks;
 }
 
-/** Hourly rollup (online/offline/unknown counts + uptime %) over the last `days` days. */
-export async function get_hourly_history(botId: string, days: number): Promise<HourlyBucket[]> {
+/** Fraction of `[windowStart, windowEnd]` spent "online", by time-weighting each mark's held duration. */
+function compute_uptime_pct(marks: StatusMark[], windowStart: Date, windowEnd: Date): number {
+  let onlineMs = 0;
+  let totalMs = 0;
+
+  for (let i = 0; i < marks.length; i++) {
+    const segStart = new Date(marks[i]!.time);
+    const segEnd = i + 1 < marks.length ? new Date(marks[i + 1]!.time) : windowEnd;
+    const clippedStart = segStart < windowStart ? windowStart : segStart;
+    const clippedEnd = segEnd > windowEnd ? windowEnd : segEnd;
+    if (clippedEnd <= clippedStart) continue;
+
+    const durationMs = clippedEnd.getTime() - clippedStart.getTime();
+    totalMs += durationMs;
+    if (marks[i]!.status === "online") onlineMs += durationMs;
+  }
+
+  return totalMs > 0 ? Math.round((onlineMs / totalMs) * 10000) / 100 : 0;
+}
+
+/** Status-change timeline + time-weighted uptime % over the last `days` days. */
+export async function get_status_timeline(
+  botId: string,
+  days: number,
+): Promise<{ uptime_pct: number; timeline: StatusMark[] }> {
   const results = await get_recent_days(botId, days);
-  return aggregate_hourly(results);
+  const timeline = to_status_marks(results);
+  const windowEnd = new Date();
+  const windowStart = new Date(windowEnd.getTime() - days * 24 * 60 * 60 * 1000);
+  return { uptime_pct: compute_uptime_pct(timeline, windowStart, windowEnd), timeline };
 }
 
 

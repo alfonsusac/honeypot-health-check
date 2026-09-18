@@ -25,7 +25,7 @@ const isProduction = process.env.NODE_ENV === "production";
 export const config = {
   discordToken: required("DISCORD_TOKEN"),
   guildId: required("GUILD_ID"),
-  checkIntervalMs: int("CHECK_INTERVAL_MS", 60_000),
+  checkIntervalMs: int("CHECK_INTERVAL_MS", 150_000),
   port: int("PORT", 3000),
   isProduction,
   // Keep startup and status alerts separate per environment so local dev runs
