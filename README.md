@@ -258,7 +258,9 @@ The `Revalidate deployment` GitHub Actions workflow calls
 anything under `src/`. Add the deployment token in the repository settings at
 **Settings > Secrets and variables > Actions** as a repository secret named
 `REVALIDATE_TOKEN`. Merged pull requests targeting `main` trigger this because
-they produce a push to `main`.
+they produce a push to `main`. You can also trigger it manually from the
+repository's **Actions** tab by selecting **Revalidate deployment** and
+clicking **Run workflow**.
 
 The API is available on the configured `PORT` (default `3000`). Stop it with
 `docker compose down`; the host `cache/` directory is left intact.
