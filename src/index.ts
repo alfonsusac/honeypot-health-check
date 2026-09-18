@@ -64,6 +64,7 @@ async function post_status_alert(
   const isOffline = result.status === "offline"
   const isRecovery = result.status === "online" && previousStatus === "offline"
   if (!isOffline && !isRecovery) return
+  if (!config.botTargets[botId]?.ping) return
 
   if (isOffline) {
     const lastAlertAt = await get_last_alert(botId)
@@ -75,8 +76,7 @@ async function post_status_alert(
     }
   }
 
-  // All status alerts use the environment-specific log channel. botTargets
-  // controls which bots are monitored; it does not select alert channels.
+  // All status alerts use the environment-specific log channel.
   const channelId = config.logChannelId
   if (!channelId) return
 

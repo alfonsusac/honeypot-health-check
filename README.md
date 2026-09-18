@@ -19,20 +19,27 @@ No database is used — results are cached to local JSON files.
 
 Bots to monitor are configured directly in [src/config.ts](src/config.ts) via
 the `botTargets` map. Each key is a bot's Discord user ID and each value stores
-the bot author and support server:
+the bot author, support server, and whether offline/recovery alerts should be
+sent:
 
 ```ts
-export const botTargets: Record<string, { author: string; support_server: string }> = {
+export const botTargets: Record<string, {
+  author: string;
+  support_server: string;
+  ping: boolean;
+}> = {
    "1450060292716494940": {
       author: "author name",
       support_server: "https://discord.gg/example",
+      ping: true,
    },
 };
 ```
 
 All monitored bots are checked together in one API call per interval. Each bot
 gets its own cached history. Leave `support_server` empty when a bot has no
-public support server.
+public support server. Set `ping: false` to monitor and cache a bot without
+sending offline or recovery alerts for it.
 
 ## Folder structure
 
@@ -150,6 +157,7 @@ type BotsResponse = {
       icon: string | null;
       author: string;
       support_server: string;
+      ping: boolean;
       error?: string;
    }>;
 };

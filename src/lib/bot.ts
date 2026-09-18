@@ -23,6 +23,7 @@ export async function get_monitored_bot_profiles(): Promise<Array<{
   icon: string | null
   author: string
   support_server: string
+  ping: boolean
   error?: string
 }>> {
   return Promise.all(config.botIds.map(async (id) => {
@@ -37,6 +38,7 @@ export async function get_monitored_bot_profiles(): Promise<Array<{
         icon: user.displayAvatarURL({ extension: "png", size: 256 }),
         author: metadata.author,
         support_server: metadata.support_server,
+        ping: metadata.ping,
       }
     } catch (error) {
       return {
@@ -47,6 +49,7 @@ export async function get_monitored_bot_profiles(): Promise<Array<{
         icon: null,
         author: metadata.author,
         support_server: metadata.support_server,
+        ping: metadata.ping,
         error: error instanceof Error ? error.message : String(error),
       }
     }
