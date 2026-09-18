@@ -79,7 +79,7 @@ export async function perform_health_checks(
     const message = err instanceof Error ? err.message : String(err);
     for (const botId of botIds) {
       results[botId] = {
-        status: "offline",
+        status: "unknown",
         last_seen: previousLastSeen[botId] ?? null,
         latency_ms: null,
         error: `presence check failed: ${message}`,
