@@ -1,0 +1,22 @@
+name: Revalidate deployment
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "src/**"
+
+jobs:
+  revalidate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Revalidate deployed service
+        env:
+          REVALIDATE_TOKEN: ${{ secrets.REVALIDATE_TOKEN }}
+        run: |
+          curl --fail-with-body --silent --show-error \
+            --get \
+            --data-urlencode "token=${REVALIDATE_TOKEN}" \
+            "https://check-bot-health.alfon.dev/revalidate"

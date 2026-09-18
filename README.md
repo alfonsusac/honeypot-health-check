@@ -253,6 +253,13 @@ the workflow completes, update the VPS with `docker compose pull && docker
 compose up -d`. If the repository or package is private, authenticate first
 with `docker login ghcr.io` using a GitHub token that can read packages.
 
+The `Revalidate deployment` GitHub Actions workflow calls
+`https://check-bot-health.alfon.dev/revalidate` after a push to `main` changes
+anything under `src/`. Add the deployment token in the repository settings at
+**Settings > Secrets and variables > Actions** as a repository secret named
+`REVALIDATE_TOKEN`. Merged pull requests targeting `main` trigger this because
+they produce a push to `main`.
+
 The API is available on the configured `PORT` (default `3000`). Stop it with
 `docker compose down`; the host `cache/` directory is left intact.
 
