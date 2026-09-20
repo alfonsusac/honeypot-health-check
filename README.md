@@ -49,19 +49,18 @@ honeypot-health-check/
 ├── tsconfig.json
 ├── .env.example
 ├── cache/
-│   ├── latest.json                 # { bots: { [botId]: HealthCheckResult }, updated_at }
+│   ├── latest.json                 # { bots: { [botId]: HealthCheckResult }, watchdog, alerts, updated_at }
 │   └── history/
-│       └── <botId>/
-│           ├── 2026-09-17.json      # one file per calendar day (UTC), per bot
-│           └── 2026-09-16.json
+│       ├── <botId>.json             # one file per bot: array of presence posts, count-capped
+│       └── watchdog.json            # array of watchdog heartbeats, count-capped
 └── src/
     ├── index.ts                    # wires everything together, check loop, alerts
     └── lib/
-        ├── config.ts               # env vars + the botTargets map
+        ├── config.ts               # env vars + the botTargets map + retention caps
         ├── types.ts                # shared types
         ├── bot.ts                  # discord.js client setup
         ├── healthcheck.ts          # batched presence check for all bots
-        ├── cache.ts                # per-bot/per-day JSON cache + retention
+        ├── cache.ts                # per-bot/global JSON cache + count-based retention
         └── server.ts               # HTTP API (Bun.serve)
 ```
 
@@ -108,14 +107,15 @@ reloads the TypeScript source as you edit it. The `dev` script uses
 
 - `GET http://localhost:3000/` — plain-text list of endpoints
 - `GET http://localhost:3000/health` — liveness probe; returns `HealthResponse`
-- `GET http://localhost:3000/bots` — current Discord profiles plus presence timelines and uptime; returns `BotsResponse`
-- `GET http://localhost:3000/watchdog` — current watchdog state and offline ranges; returns `WatchdogResponse`
-- `GET http://localhost:3000/status` — latest + last 5 days of history for all bots; returns `AllBotsStatusResponse`
-- `GET http://localhost:3000/status/:botId` — latest + last 7 days of history for one bot; returns `BotStatusResponse`
-- `GET http://localhost:3000/status/:botId/page/:number` — one calendar day of raw checks; returns `StatusPageResponse`
+- `GET http://localhost:3000/bots` — profiles + latest + uptime % + merged status timeline (first 10) for all bots; returns `BotsResponse`
+- `GET http://localhost:3000/watchdog` — current watchdog state, offline ranges, and shard reconnect times; returns `WatchdogResponse`
+- `GET http://localhost:3000/bot/:botId` — one bot's profile + latest + uptime % + merged status timeline, 50 per page; returns `BotStatusResponse`
+- `GET http://localhost:3000/bot/:botId?page=2` — next page of the merged status timeline
 
-Replace `:botId` with a real configured bot ID. The page number is zero-based:
-`0` is today, `1` is yesterday, and so on. Successful JSON responses use HTTP
+Replace `:botId` with a real configured bot ID. Both bot timelines are
+**count-bounded**: `/bots` shows the 10 most recent merged marks (no pagination),
+`/bot/:botId` pages through all of them 50 at a time via `?page=`; neither is
+bounded by time. Successful JSON responses use HTTP
 `200`. Unknown bot IDs return HTTP `404` with `{ error: string }`.
 
 ### API response types
@@ -145,6 +145,21 @@ export type HealthResponse = {
    uptime_s: number;
 };
 
+// A single merged timeline mark: a real presence post, or a synthetic watchdog boundary.
+export type MergedStatus =
+   | PresenceStatus
+   | "instance offline"
+   | "instance online"
+   | "shard offline"
+   | "shard online";
+
+export type StatusMark = {
+   status: MergedStatus;
+   time: string;
+   // True when this post came from a gateway replay after a shard reconnect (arrival-stamped).
+   replayed?: boolean;
+};
+
 export type BotsResponse = {
    bots: Array<{
       id: string;
@@ -156,12 +171,10 @@ export type BotsResponse = {
       support_server: string;
       ping: boolean;
       error?: string;
+      latest: HealthCheckResult | null;
       uptime_pct: number;
-      timeline: Array<{
-         status: PresenceStatus;
-         time: string;
-         replayed?: boolean;
-      }>;
+      // The 10 most recent merged/deduped status marks.
+      timeline: StatusMark[];
    }>;
 };
 
@@ -179,49 +192,22 @@ export type WatchdogResponse = {
    shardResumed: string[];
 };
 
-export type AllBotsStatusResponse = {
-   days: number;
-   bots: Record<string, {
-      latest: HealthCheckResult | null;
-      uptime_pct: number;
-      // Total merged deduped marks for this bot (only the first 10 are in `timeline`).
-      total: number;
-      timeline: StatusMark[];
-   }>;
-};
-
 export type BotStatusResponse = {
-   bot_id: string;
-   days: number;
+   id: string;
+   display_name: string | null;
+   username: string;
+   tag: string;
+   icon: string | null;
+   author: string;
+   support_server: string;
+   ping: boolean;
+   error?: string;
    latest: HealthCheckResult | null;
    uptime_pct: number;
    page: number;
    page_size: number;
    total: number;
    timeline: StatusMark[];
-};
-
-// A single merged timeline mark: a real presence post, or a synthetic watchdog boundary.
-export type MergedStatus =
-   | PresenceStatus
-   | "instance offline"
-   | "instance online"
-   | "shard offline"
-   | "shard online";
-
-export type StatusMark = {
-   status: MergedStatus;
-   time: string;
-   // True when this post came from a gateway replay after a shard reconnect (arrival-stamped).
-   replayed?: boolean;
-};
-
-export type StatusPageResponse = {
-   bot_id: string;
-   page: number;
-   date: string;
-   count: number;
-   results: HealthCheckResult[];
 };
 
 export type ApiError = {
@@ -241,19 +227,12 @@ const health = await fetch("http://localhost:3000/health")
 const bots = await fetch("http://localhost:3000/bots")
    .then((response) => response.json() as Promise<BotsResponse>);
 
-const allStatus = await fetch("http://localhost:3000/status")
-   .then((response) => response.json() as Promise<AllBotsStatusResponse>);
-
 const botId = "1450060292716494940";
-const botStatus = await fetch(`http://localhost:3000/status/${botId}`)
+const bot = await fetch(`http://localhost:3000/bot/${botId}`)
    .then((response) => response.json() as Promise<BotStatusResponse>);
 
-const botStatusPage2 = await fetch(`http://localhost:3000/status/${botId}?page=2`)
+const botPage2 = await fetch(`http://localhost:3000/bot/${botId}?page=2`)
    .then((response) => response.json() as Promise<BotStatusResponse>);
-
-const page = 0;
-const botDay = await fetch(`http://localhost:3000/status/${botId}/page/${page}`)
-   .then((response) => response.json() as Promise<StatusPageResponse>);
 ```
 
 For production, replace `http://localhost:3000` with the VPS URL or domain.
@@ -283,31 +262,34 @@ boundary is the restart's `"instance"` heartbeat, so it is labeled `"instance"`.
 
 Discord replayed events after a shard reconnect carry no timestamps: posts
 reconciled from the replay are arrival-stamped and flagged `replayed: true`
-(both in `/status`/`:botId` timelines and in the "shard reconnected" Discord
-message, which lists the replayed presence changes with an "approximate"
+(both in `/bots` and `/bot/:botId` timelines and in the "shard reconnected"
+Discord message, which lists the replayed presence changes with an "approximate"
 label). Between the drop and the reconnect the gateway delivers nothing, so
 that span is excluded from bot uptime as unknown time.
 
-`/status` and `/status/:botId` timelines pre-merge the bot's Discord presence
+The `/bots` and `/bot/:botId` timelines pre-merge the bot's Discord presence
 posts with the `/watchdog` offline ranges: each offline range contributes two
 synthetic marks — `` `${cause} offline` `` at its `from` and `` `${cause} online` ``
 at its `to` (`"instance offline"`/`"instance online"`/`"shard offline"`/`"shard
 online"`). The merged marks are sorted chronologically, consecutive identical
 statuses are collapsed (so repeated re-seed `online`s disappear), and the
-result is listed most recent first. `/status` returns the first 10 marks per bot
-with a `total` count; `/status/:botId` pages through all of them, 50 per page,
-via `?page=2` (and so on), echoing `page`, `page_size`, and `total`. `/bots`
-timelines stay presence-only (collapse to presence changes only, chronological).
-Uptime excludes watchdog-down ranges as unknown time.
+result is listed most recent first. History is retained by **entry count**, not
+by time: each bot keeps up to `historyEntryCap` (2000) presence posts and the
+watchdog keeps up to `watchdogHeartbeatCap` (20000) heartbeats, dropping the
+oldest past the cap — see [src/config.ts](src/config.ts). `/bots` returns the 10
+most recent marks per bot (no pagination); `/bot/:botId` pages through all of
+them, 50 per page, via `?page=2` (and so on), echoing `page`, `page_size`, and
+`total`.
+Uptime excludes watchdog-down ranges as unknown time and is measured over each
+bot's retained history span (its oldest kept mark to now).
 Monitored bot presence changes are also handled immediately through Discord's
 Gateway `presenceUpdate` event — the post is written, a liveness heartbeat
 follows, then a status alert is sent (alerts are ping-gated per-bot and never
 affect timing). The periodic check remains as a fallback reconciliation path.
 
-The `/status` and `/status/:botId` merged timelines are paginated, so the
-responses are now bounded (10 and 50 marks per response respectively); the
-server still gzips responses over 1 KB when the client sends
-`Accept-Encoding: gzip`.
+The `/bots` and `/bot/:botId` merged timelines are count-bounded (10 and 50
+marks per response respectively), so responses stay small; the server still
+gzips responses over 1 KB when the client sends `Accept-Encoding: gzip`.
 
 ## Docker production deployment
 
@@ -334,7 +316,7 @@ the workflow completes, update the VPS with `docker compose pull && docker
 compose up -d`. If the repository or package is private, authenticate first
 with `docker login ghcr.io` using a GitHub token that can read packages.
 
-The `Revalidate deployment` GitHub Actions workflow calls
+The `Revalidate deployment` GitHub Actions workflow POSTs to
 `https://check-bot-health.alfon.dev/revalidate` after a push to `main` changes
 anything under `src/`. Add the deployment token in the repository settings at
 **Settings > Secrets and variables > Actions** as a repository secret named
@@ -342,6 +324,27 @@ anything under `src/`. Add the deployment token in the repository settings at
 they produce a push to `main`. You can also trigger it manually from the
 repository's **Actions** tab by selecting **Revalidate deployment** and
 clicking **Run workflow**.
+
+The workflow sends a JSON body (`{"token": "<REVALIDATE_TOKEN>"}`). The status
+page that owns the endpoint (not this repo) must expose a matching `POST
+/revalidate`. A minimal Next.js App Router implementation:
+
+```ts
+// src/app/revalidate/route.ts
+import { NextRequest } from "next/server";
+import { revalidatePath } from "next/cache";
+
+export async function POST(request: NextRequest) {
+  const body = await request.json();
+  if (body.token === process.env.REVALIDATE_TOKEN || process.env.NODE_ENV === "development") {
+    revalidatePath("/");
+  }
+}
+```
+
+The status page's `REVALIDATE_TOKEN` environment variable must hold the same
+value as the GitHub Actions secret (and the dev bypass is only for local
+testing).
 
 The API is available on the configured `PORT` (default `3000`). Stop it with
 `docker compose down`; the host `cache/` directory is left intact.

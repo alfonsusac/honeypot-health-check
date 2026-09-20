@@ -1,21 +1,17 @@
 import { config } from "./config";
 import { get_monitored_bot_profiles } from "./bot";
-import { get_bot_status_timeline, get_day_page, get_latest_all, get_latest_for, get_status_timeline, get_watchdog_status } from "./cache";
+import { get_bot_status_timeline, get_latest_all, get_latest_for, get_watchdog_status } from "./cache";
 
 const ENDPOINTS_TEXT = `honeypot-health-check API
 
-GET /                              this list
-GET /health                        liveness probe
-GET /bots                          bot profiles
-GET /watchdog                      watchdog heartbeat status, last ${5} days
-GET /status                        latest + uptime % + merged status timeline (first 10), last ${5} days, all bots
-GET /status/:botId                 latest + uptime % + merged status timeline (50 per page), last ${7} days, one bot
-GET /status/:botId?page=2          next page of the merged status timeline
-GET /status/:botId/page/:number    one calendar day of raw checks (0 = today, 1 = yesterday, ...)
+GET /                      this list
+GET /health                liveness probe
+GET /watchdog              watchdog heartbeat status + offline ranges
+GET /bots                  profiles + latest + uptime % + merged status timeline (first 10)
+GET /bot/:botId            one bot's profile + latest + uptime % + merged status timeline (50 per page)
+GET /bot/:botId?page=2     next page of the merged status timeline
 `;
 
-const STATUS_ALL_DAYS = 5;
-const STATUS_BOT_DAYS = 7;
 const STATUS_ALL_PAGE_SIZE = 10;
 const STATUS_BOT_PAGE_SIZE = 50;
 
@@ -63,48 +59,24 @@ export function start_server() {
 
       if (url.pathname === "/bots") {
         const profiles = await get_monitored_bot_profiles();
+        const latest = await get_latest_all();
         const bots = await Promise.all(profiles.map(async (bot) => {
-          const { uptime_pct, timeline } = await get_status_timeline(bot.id, STATUS_ALL_DAYS);
-          return { ...bot, uptime_pct, timeline };
+          const { uptime_pct, timeline } = await get_bot_status_timeline(bot.id, STATUS_ALL_PAGE_SIZE, 1);
+          return {
+            ...bot,
+            latest: latest[bot.id] ?? null,
+            uptime_pct,
+            timeline,
+          };
         }));
         return json({ bots }, 200, req);
       }
 
       if (url.pathname === "/watchdog") {
-        return json(await get_watchdog_status(STATUS_ALL_DAYS), 200, req);
+        return json(await get_watchdog_status(), 200, req);
       }
 
-      if (url.pathname === "/status") {
-        const latest = await get_latest_all();
-        const bots: Record<string, { latest: unknown; uptime_pct: number; total: number; timeline: Awaited<ReturnType<typeof get_bot_status_timeline>>["timeline"] }> = {};
-
-        for (const botId of config.botIds) {
-          const { uptime_pct, total, timeline } = await get_bot_status_timeline(botId, STATUS_ALL_DAYS, STATUS_ALL_PAGE_SIZE, 1);
-          bots[botId] = {
-            latest: latest[botId] ?? null,
-            uptime_pct,
-            total,
-            timeline,
-          };
-        }
-
-        return json({ days: STATUS_ALL_DAYS, bots }, 200, req);
-      }
-
-      const pageMatch = url.pathname.match(/^\/status\/([^/]+)\/page\/(\d+)$/);
-      if (pageMatch) {
-        const botId = pageMatch[1]!;
-        const pageParam = pageMatch[2]!;
-        if (!config.botIds.includes(botId)) {
-          return json({ error: `unknown bot_id: ${botId}` }, 404, req);
-        }
-
-        const page = Number.parseInt(pageParam, 10);
-        const { date, results } = await get_day_page(botId, page);
-        return json({ bot_id: botId, page, date, count: results.length, results }, 200, req);
-      }
-
-      const botMatch = url.pathname.match(/^\/status\/([^/]+)$/);
+      const botMatch = url.pathname.match(/^\/bot\/([^/]+)$/);
       if (botMatch) {
         const botId = botMatch[1]!;
         if (!config.botIds.includes(botId)) {
@@ -113,15 +85,24 @@ export function start_server() {
 
         const pageParam = url.searchParams.get("page");
         const page = pageParam ? (Number.parseInt(pageParam, 10) || 1) : 1;
+        const profiles = await get_monitored_bot_profiles();
+        const profile = profiles.find((candidate) => candidate.id === botId);
         const latest = await get_latest_for(botId);
         const { uptime_pct, page: resolvedPage, page_size, total, timeline } = await get_bot_status_timeline(
           botId,
-          STATUS_BOT_DAYS,
           STATUS_BOT_PAGE_SIZE,
           page,
         );
         return json(
-          { bot_id: botId, days: STATUS_BOT_DAYS, latest, uptime_pct, page: resolvedPage, page_size, total, timeline },
+          {
+            ...(profile ?? { id: botId }),
+            latest,
+            uptime_pct,
+            page: resolvedPage,
+            page_size,
+            total,
+            timeline,
+          },
           200,
           req,
         );

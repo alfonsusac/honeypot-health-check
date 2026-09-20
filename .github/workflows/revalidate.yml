@@ -18,6 +18,7 @@ jobs:
           REVALIDATE_TOKEN: ${{ secrets.REVALIDATE_TOKEN }}
         run: |
           curl --fail-with-body --silent --show-error \
-            --get \
-            --data-urlencode "token=${REVALIDATE_TOKEN}" \
+            -X POST \
+            -H "content-type: application/json" \
+            --data "{\"token\":\"${REVALIDATE_TOKEN}\"}" \
             "https://check-bot-health.alfon.dev/revalidate"

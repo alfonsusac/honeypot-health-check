@@ -1,7 +1,6 @@
 import { config } from "./config";
 import type {
   HealthCheckResult,
-  HealthStatus,
   HeartbeatStartup,
   LatestCacheFile,
   PresenceHistoryEntry,
@@ -22,27 +21,8 @@ const EMPTY_LATEST: LatestCacheFile = {
   updated_at: new Date(0).toISOString(),
 };
 
-function pad(n: number): string {
-  return n.toString().padStart(2, "0");
-}
-
-/** Formats a date as YYYY-MM-DD in UTC, used as both the day-file name and page key. */
-function format_day(date: Date): string {
-  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`;
-}
-
-function day_offset(date: Date, days: number): Date {
-  const copy = new Date(date);
-  copy.setUTCDate(copy.getUTCDate() - days);
-  return copy;
-}
-
-function bot_history_dir(botId: string): URL {
-  return new URL(`${botId}/`, HISTORY_DIR);
-}
-
-function day_file_path(botId: string, date: Date): URL {
-  return new URL(`${format_day(date)}.json`, bot_history_dir(botId));
+function history_file_path(name: string): URL {
+  return new URL(`${name}.json`, HISTORY_DIR);
 }
 
 async function ensure_dir(dir: URL): Promise<void> {
@@ -65,6 +45,15 @@ async function write_json(path: URL, dir: URL, data: unknown): Promise<void> {
   await Bun.write(path, JSON.stringify(data));
 }
 
+/** Appends an entry to a count-capped history file, dropping the oldest past the cap. */
+async function append_pruned<T>(name: string, entry: T, cap: number): Promise<void> {
+  const path = history_file_path(name);
+  const results = await read_json<T[]>(path, []);
+  results.push(entry);
+  if (results.length > cap) results.splice(0, results.length - cap);
+  await write_json(path, HISTORY_DIR, results);
+}
+
 async function read_latest(): Promise<LatestCacheFile> {
   const latest = await read_json(LATEST_PATH, structuredClone(EMPTY_LATEST));
   // Defensive against cache files written before a field (e.g. `alerts`) existed.
@@ -72,24 +61,6 @@ async function read_latest(): Promise<LatestCacheFile> {
   latest.watchdog ??= null;
   latest.alerts ??= {};
   return latest;
-}
-
-async function read_day<T = PresenceHistoryEntry>(botId: string, date: Date): Promise<T[]> {
-  return read_json(day_file_path(botId, date), []);
-}
-
-/** Deletes day-files older than the retention window for a single bot. */
-async function purge_old_days(botId: string): Promise<void> {
-  const dir = bot_history_dir(botId);
-  const glob = new Bun.Glob("*.json");
-  const cutoff = format_day(day_offset(new Date(), config.retentionDays));
-
-  for await (const name of glob.scan({ cwd: dir.pathname, absolute: false })) {
-    const day = name.replace(/\.json$/, "");
-    if (day < cutoff) {
-      await Bun.file(new URL(name, dir)).delete().catch(() => {});
-    }
-  }
 }
 
 export async function append_result(botId: string, result: HealthCheckResult): Promise<void> {
@@ -103,13 +74,12 @@ export async function append_result(botId: string, result: HealthCheckResult): P
 
     // "unknown" means the check itself failed (no presence data observed), not a real presence event.
     if (result.status !== "unknown") {
-      const today = new Date();
-      const dayResults = (await read_day(botId, today)).map(({ timestamp, status, replayed }) => ({ timestamp, status, replayed }));
-      dayResults.push({ timestamp: result.timestamp, status: result.status, replayed: result.replayed });
-      await write_json(day_file_path(botId, today), bot_history_dir(botId), dayResults);
+      await append_pruned(
+        botId,
+        { timestamp: result.timestamp, status: result.status, replayed: result.replayed },
+        config.historyEntryCap,
+      );
     }
-
-    await purge_old_days(botId);
   });
   return result_write_queue;
 }
@@ -127,12 +97,7 @@ export async function append_watchdog_heartbeat(
     latest.watchdog = heartbeat;
     latest.updated_at = timestamp;
     await write_json(LATEST_PATH, CACHE_DIR, latest);
-
-    const today = new Date(timestamp);
-    const dayResults = await read_day<WatchdogHeartbeat>("watchdog", today);
-    dayResults.push(heartbeat);
-    await write_json(day_file_path("watchdog", today), bot_history_dir("watchdog"), dayResults);
-    await purge_old_days("watchdog");
+    await append_pruned("watchdog", heartbeat, config.watchdogHeartbeatCap);
   });
   return heartbeat_write_queue;
 }
@@ -160,14 +125,14 @@ export async function get_latest_for(botId: string): Promise<HealthCheckResult |
   return latest.bots[botId] ?? null;
 }
 
-export async function get_watchdog_status(days: number): Promise<WatchdogStatus> {
+export async function get_watchdog_status(): Promise<WatchdogStatus> {
   const latest = await read_latest();
   const lastSeen = latest.watchdog?.timestamp ?? null;
   const current = lastSeen && Date.now() - new Date(lastSeen).getTime() <= config.checkIntervalMs
     ? "online"
     : "offline";
-  const heartbeats = await get_sorted_heartbeats(days);
-  const offlines = compute_offline_ranges(heartbeats, Date.now() - days * 24 * 60 * 60 * 1000);
+  const heartbeats = await get_sorted_heartbeats();
+  const offlines = compute_offline_ranges(heartbeats);
   const shardResumed: string[] = [];
 
   // Any "shard" boundary heartbeat is a reconnect point. Replayed events are arrival-stamped,
@@ -182,9 +147,9 @@ export async function get_watchdog_status(days: number): Promise<WatchdogStatus>
   return { current, last_seen: lastSeen, offlines: offlines.reverse(), shardResumed: shardResumed.reverse() };
 }
 
-/** Watchdog heartbeats over the last `days`, oldest first, with a numeric timeMs. */
-async function get_sorted_heartbeats(days: number): Promise<Array<WatchdogHeartbeat & { timeMs: number }>> {
-  const results = await get_recent_days<WatchdogHeartbeat>("watchdog", days);
+/** All retained watchdog heartbeats, oldest first, with a numeric timeMs. */
+async function get_sorted_heartbeats(): Promise<Array<WatchdogHeartbeat & { timeMs: number }>> {
+  const results = await read_json(history_file_path("watchdog"), [] as WatchdogHeartbeat[]);
   return results
     .map((result) => ({ ...result, timeMs: new Date(result.timestamp).getTime() }))
     .filter((result) => Number.isFinite(result.timeMs))
@@ -195,7 +160,6 @@ async function get_sorted_heartbeats(days: number): Promise<Array<WatchdogHeartb
  * Input must be ascending by timeMs; output is chronological with the closing heartbeat's cause. */
 function compute_offline_ranges(
   heartbeats: Array<WatchdogHeartbeat & { timeMs: number }>,
-  windowStartMs: number,
 ): OfflineRange[] {
   const offlines: OfflineRange[] = [];
 
@@ -203,7 +167,7 @@ function compute_offline_ranges(
     const previous = heartbeats[i - 1]!;
     const currentHeartbeat = heartbeats[i]!;
     if (!currentHeartbeat.startup || currentHeartbeat.timeMs <= previous.timeMs) continue;
-    const fromMs = Math.max(previous.timeMs, windowStartMs);
+    const fromMs = previous.timeMs;
     if (currentHeartbeat.timeMs <= fromMs) continue;
     offlines.push({
       from: new Date(fromMs).toISOString(),
@@ -235,32 +199,13 @@ export async function clear_last_alert(botId: string): Promise<void> {
   await write_json(LATEST_PATH, CACHE_DIR, latest);
 }
 
-/** Merges the last `days` day-files for a bot, oldest entry first (chronological). */
-export async function get_recent_days<T = PresenceHistoryEntry>(botId: string, days: number): Promise<T[]> {
-  const safeDays = Math.min(Math.max(Math.floor(days) || 1, 1), config.retentionDays);
-  const today = new Date();
-  const results: T[] = [];
-
-  for (let i = safeDays - 1; i >= 0; i--) {
-    const dayResults = await read_day<T>(botId, day_offset(today, i));
-    results.push(...dayResults);
-  }
-
-  return results;
-}
-
-/** Maps chronological entries into marks; by default collapses to one per actual status change,
- * but can keep every presence event post (e.g. repeated `online`s after startup re-seeds). */
-function to_status_marks(results: PresenceHistoryEntry[], collapseRepeats = true): StatusMark[] {
-  const marks: StatusMark[] = [];
-  for (const entry of results) {
-    if (collapseRepeats) {
-      const last = marks[marks.length - 1];
-      if (last && last.status === entry.status) continue;
-    }
-    marks.push({ status: entry.status, time: entry.timestamp, ...(entry.replayed ? { replayed: true } : {}) });
-  }
-  return marks;
+/** Maps chronological presence entries into marks without collapsing (dedup happens after merging). */
+function to_status_marks(results: PresenceHistoryEntry[]): StatusMark[] {
+  return results.map((entry) => ({
+    status: entry.status,
+    time: entry.timestamp,
+    ...(entry.replayed ? { replayed: true } : {}),
+  }));
 }
 
 /** A watchdog-down span, per heartbeat evidence: from a heartbeat to the next `startup` one. */
@@ -325,21 +270,6 @@ function compute_uptime_pct(
   return knownMs > 0 ? Math.round((onlineMs / knownMs) * 10000) / 100 : 0;
 }
 
-/** Status-change timeline + time-weighted uptime % over the last `days` days. */
-export async function get_status_timeline(
-  botId: string,
-  days: number,
-  options?: { collapseRepeats?: boolean },
-): Promise<{ uptime_pct: number; timeline: StatusMark[] }> {
-  const results = await get_recent_days(botId, days);
-  const windowEnd = new Date();
-  const windowStart = new Date(windowEnd.getTime() - days * 24 * 60 * 60 * 1000);
-  const watchdogResults = await get_recent_days<WatchdogHeartbeat>("watchdog", days);
-  const unknownRanges = compute_unknown_ranges(watchdogResults, windowStart.getTime());
-  const timeline = to_status_marks(results, options?.collapseRepeats ?? true);
-  return { uptime_pct: compute_uptime_pct(timeline, unknownRanges, windowStart, windowEnd), timeline };
-}
-
 export interface BotStatusTimelinePage {
   uptime_pct: number;
   total: number;
@@ -351,34 +281,32 @@ export interface BotStatusTimelinePage {
 /**
  * Merged, deduped, paginated status timeline for one bot: real presence marks interleaved with
  * synthetic watchdog boundary marks (`"${cause} offline"` at each offline range start, `"${cause}
- * online"` at its end). Entries are sorted chronologically, consecutive identical statuses are
- * collapsed, then the newest `pageSize` marks for the requested page are returned (recent-first).
- * Uptime % is computed from presence marks plus watchdog unknown ranges — synthetic marks are never
- * treated as uptime-relevant, keeping the calculation identical to before.
+ * online"` at its end). Works on the bot's retained history (entry-count capped, not time-bounded):
+ * entries are sorted chronologically, consecutive identical statuses are collapsed, and the newest
+ * `pageSize` marks for the requested page are returned (recent-first).
+ * Uptime % is over the bot's retained history span — from its oldest kept mark to now — with
+ * watchdog-down ranges excluded as unknown time; synthetic marks are never treated as
+ * uptime-relevant.
  */
 export async function get_bot_status_timeline(
   botId: string,
-  days: number,
   pageSize: number,
   page: number,
 ): Promise<BotStatusTimelinePage> {
-  const results = await get_recent_days(botId, days);
+  const results = await read_json(history_file_path(botId), [] as PresenceHistoryEntry[]);
   const windowEnd = new Date();
-  const windowStart = new Date(windowEnd.getTime() - days * 24 * 60 * 60 * 1000);
-  const heartbeats = await get_sorted_heartbeats(days);
+  const windowStart = results.length > 0 ? new Date(results[0]!.timestamp) : windowEnd;
+  const marks = to_status_marks(results);
+  const heartbeats = await get_sorted_heartbeats();
+
   const unknownRanges = compute_unknown_ranges(
     heartbeats.map(({ timeMs, ...heartbeat }) => heartbeat),
     windowStart.getTime(),
   );
-  const uptime_pct = compute_uptime_pct(
-    to_status_marks(results, false),
-    unknownRanges,
-    windowStart,
-    windowEnd,
-  );
+  const uptime_pct = compute_uptime_pct(marks, unknownRanges, windowStart, windowEnd);
 
-  const merged: StatusMark[] = [...to_status_marks(results, false)];
-  for (const offline of compute_offline_ranges(heartbeats, windowStart.getTime())) {
+  const merged: StatusMark[] = [...marks];
+  for (const offline of compute_offline_ranges(heartbeats)) {
     merged.push({ status: `${offline.cause} offline` as const, time: offline.from });
     merged.push({ status: `${offline.cause} online` as const, time: offline.to });
   }
@@ -403,16 +331,5 @@ export async function get_bot_status_timeline(
     page_size: pageSize,
     timeline: recentFirst.slice(start, start + pageSize),
   };
-}
-
-
-/** page 0 = today, page 1 = yesterday, etc. */
-export async function get_day_page(
-  botId: string,
-  page: number,
-): Promise<{ date: string; results: PresenceHistoryEntry[] }> {
-  const date = day_offset(new Date(), page);
-  const results = await read_day(botId, date);
-  return { date: format_day(date), results: results.reverse() };
 }
 
