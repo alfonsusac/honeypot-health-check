@@ -26,8 +26,6 @@ export const config = {
   discordToken: required("DISCORD_TOKEN"),
   guildId: required("GUILD_ID"),
   checkIntervalMs: int("CHECK_INTERVAL_MS", watchdogConfig.heartbeatIntervalMs),
-  watchdogGraceMs: watchdogConfig.heartbeatGraceMs,
-  watchdogBucketMs: watchdogConfig.bucketDurationMs,
   port: int("PORT", 3000),
   isProduction,
   // Keep startup and status alerts separate per environment so local dev runs

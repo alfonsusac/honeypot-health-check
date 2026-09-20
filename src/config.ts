@@ -12,6 +12,4 @@ export const botTargets: Record<string, {
 }
 export const watchdogConfig = {
   heartbeatIntervalMs: 150_000,
-  heartbeatGraceMs: 5_000,
-  bucketDurationMs: 30 * 1000,
 } as const;

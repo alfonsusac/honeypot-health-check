@@ -2,9 +2,12 @@ import { config } from "./config";
 import type {
   HealthCheckResult,
   HealthStatus,
+  HeartbeatStartup,
   LatestCacheFile,
+  PresenceHistoryEntry,
   StatusMark,
-  WatchdogHourlyBucket,
+  WatchdogHeartbeat,
+  OfflineRange,
   WatchdogStatus,
 } from "./types";
 
@@ -32,11 +35,6 @@ function day_offset(date: Date, days: number): Date {
   const copy = new Date(date);
   copy.setUTCDate(copy.getUTCDate() - days);
   return copy;
-}
-
-function bucket_key(timestamp: string, bucketDurationMs: number): string {
-  const bucketStartMs = Math.floor(new Date(timestamp).getTime() / bucketDurationMs) * bucketDurationMs;
-  return new Date(bucketStartMs).toISOString();
 }
 
 function bot_history_dir(botId: string): URL {
@@ -76,7 +74,7 @@ async function read_latest(): Promise<LatestCacheFile> {
   return latest;
 }
 
-async function read_day(botId: string, date: Date): Promise<HealthCheckResult[]> {
+async function read_day<T = PresenceHistoryEntry>(botId: string, date: Date): Promise<T[]> {
   return read_json(day_file_path(botId, date), []);
 }
 
@@ -95,39 +93,51 @@ async function purge_old_days(botId: string): Promise<void> {
 }
 
 export async function append_result(botId: string, result: HealthCheckResult): Promise<void> {
-  const latest = await read_latest();
-  latest.bots[botId] = result;
-  latest.updated_at = new Date().toISOString();
-  await write_json(LATEST_PATH, CACHE_DIR, latest);
+  // Serialize read-modify-write so concurrent posts (e.g. a burst of replayed gateway events
+  // after a shard reconnect) cannot interleave and lose entries.
+  result_write_queue = result_write_queue.then(async () => {
+    const latest = await read_latest();
+    latest.bots[botId] = result;
+    latest.updated_at = new Date().toISOString();
+    await write_json(LATEST_PATH, CACHE_DIR, latest);
 
-  const today = new Date();
-  const dayResults = await read_day(botId, today);
-  dayResults.push(result);
-  await write_json(day_file_path(botId, today), bot_history_dir(botId), dayResults);
+    // "unknown" means the check itself failed (no presence data observed), not a real presence event.
+    if (result.status !== "unknown") {
+      const today = new Date();
+      const dayResults = (await read_day(botId, today)).map(({ timestamp, status, replayed }) => ({ timestamp, status, replayed }));
+      dayResults.push({ timestamp: result.timestamp, status: result.status, replayed: result.replayed });
+      await write_json(day_file_path(botId, today), bot_history_dir(botId), dayResults);
+    }
 
-  await purge_old_days(botId);
+    await purge_old_days(botId);
+  });
+  return result_write_queue;
 }
 
-export async function append_watchdog_heartbeat(timestamp = new Date().toISOString()): Promise<void> {
-  const heartbeat: HealthCheckResult = {
-    status: "online",
-    last_seen: timestamp,
-    latency_ms: null,
-    error: null,
-    timestamp,
-    method: "heartbeat",
-  };
-  const latest = await read_latest();
-  latest.watchdog = heartbeat;
-  latest.updated_at = timestamp;
-  await write_json(LATEST_PATH, CACHE_DIR, latest);
+let result_write_queue = Promise.resolve();
 
-  const today = new Date(timestamp);
-  const dayResults = await read_day("watchdog", today);
-  dayResults.push(heartbeat);
-  await write_json(day_file_path("watchdog", today), bot_history_dir("watchdog"), dayResults);
-  await purge_old_days("watchdog");
+export async function append_watchdog_heartbeat(
+  timestamp = new Date().toISOString(),
+  startup: HeartbeatStartup = false,
+  replayed_events?: number,
+): Promise<void> {
+  heartbeat_write_queue = heartbeat_write_queue.then(async () => {
+    const heartbeat: WatchdogHeartbeat = { timestamp, startup, ...(replayed_events !== undefined ? { replayed_events } : {}) };
+    const latest = await read_latest();
+    latest.watchdog = heartbeat;
+    latest.updated_at = timestamp;
+    await write_json(LATEST_PATH, CACHE_DIR, latest);
+
+    const today = new Date(timestamp);
+    const dayResults = await read_day<WatchdogHeartbeat>("watchdog", today);
+    dayResults.push(heartbeat);
+    await write_json(day_file_path("watchdog", today), bot_history_dir("watchdog"), dayResults);
+    await purge_old_days("watchdog");
+  });
+  return heartbeat_write_queue;
 }
+
+let heartbeat_write_queue = Promise.resolve();
 
 export async function get_latest_all(): Promise<Record<string, HealthCheckResult>> {
   const latest = await read_latest();
@@ -156,37 +166,53 @@ export async function get_watchdog_status(days: number): Promise<WatchdogStatus>
   const current = lastSeen && Date.now() - new Date(lastSeen).getTime() <= config.checkIntervalMs
     ? "online"
     : "offline";
-  const results = await get_recent_days("watchdog", days);
-  const now = new Date();
-  const bucketDurationMs = config.watchdogBucketMs;
-  const currentBucketStartMs = Math.floor(now.getTime() / bucketDurationMs) * bucketDurationMs;
-  const firstBucketMs = currentBucketStartMs - (days * 24 * 60 * 60 * 1000 - bucketDurationMs);
-  const heartbeatsByHour = new Map<string, number>();
-  const heartbeatCoverage = results
-    .map((result) => new Date(result.timestamp).getTime())
-    .filter((timestamp) => Number.isFinite(timestamp))
-    .map((timestamp) => ({
-      start: timestamp,
-      end: timestamp + config.checkIntervalMs + config.watchdogGraceMs,
-    }));
+  const heartbeats = await get_sorted_heartbeats(days);
+  const offlines = compute_offline_ranges(heartbeats, Date.now() - days * 24 * 60 * 60 * 1000);
+  const shardResumed: string[] = [];
 
-  for (const result of results) {
-    const key = bucket_key(result.timestamp, bucketDurationMs);
-    heartbeatsByHour.set(key, (heartbeatsByHour.get(key) ?? 0) + 1);
+  // Any "shard" boundary heartbeat is a reconnect point. Replayed events are arrival-stamped,
+  // so the gap is still marked offline (offlines above); this is informational only.
+  for (const heartbeat of heartbeats) {
+    if (heartbeat.startup === "shard") {
+      shardResumed.push(heartbeat.timestamp);
+    }
   }
 
-  const hourly: WatchdogHourlyBucket[] = [];
-  for (let bucketStartMs = firstBucketMs; bucketStartMs <= currentBucketStartMs; bucketStartMs += bucketDurationMs) {
-    const key = new Date(bucketStartMs).toISOString();
-    const heartbeats = heartbeatsByHour.get(key) ?? 0;
-    const bucketEndMs = bucketStartMs + bucketDurationMs;
-    const was_online = heartbeatCoverage.some((coverage) => (
-      coverage.start < bucketEndMs && coverage.end > bucketStartMs
-    ));
-    hourly.push({ hour: key, heartbeats, was_online });
+  // Offline ranges are detected oldest-first; expose them most recent first.
+  return { current, last_seen: lastSeen, offlines: offlines.reverse(), shardResumed: shardResumed.reverse() };
+}
+
+/** Watchdog heartbeats over the last `days`, oldest first, with a numeric timeMs. */
+async function get_sorted_heartbeats(days: number): Promise<Array<WatchdogHeartbeat & { timeMs: number }>> {
+  const results = await get_recent_days<WatchdogHeartbeat>("watchdog", days);
+  return results
+    .map((result) => ({ ...result, timeMs: new Date(result.timestamp).getTime() }))
+    .filter((result) => Number.isFinite(result.timeMs))
+    .sort((left, right) => left.timeMs - right.timeMs);
+}
+
+/** Detects watchdog-down spans from sorted heartbeats: from a heartbeat to the next `startup` one.
+ * Input must be ascending by timeMs; output is chronological with the closing heartbeat's cause. */
+function compute_offline_ranges(
+  heartbeats: Array<WatchdogHeartbeat & { timeMs: number }>,
+  windowStartMs: number,
+): OfflineRange[] {
+  const offlines: OfflineRange[] = [];
+
+  for (let i = 1; i < heartbeats.length; i++) {
+    const previous = heartbeats[i - 1]!;
+    const currentHeartbeat = heartbeats[i]!;
+    if (!currentHeartbeat.startup || currentHeartbeat.timeMs <= previous.timeMs) continue;
+    const fromMs = Math.max(previous.timeMs, windowStartMs);
+    if (currentHeartbeat.timeMs <= fromMs) continue;
+    offlines.push({
+      from: new Date(fromMs).toISOString(),
+      to: new Date(currentHeartbeat.timeMs).toISOString(),
+      cause: currentHeartbeat.startup === "shard" ? "shard" : "instance",
+    });
   }
 
-  return { current, last_seen: lastSeen, hourly };
+  return offlines;
 }
 
 /** Timestamp of the last offline alert sent for a bot, or null if none / never alerted. */
@@ -210,121 +236,74 @@ export async function clear_last_alert(botId: string): Promise<void> {
 }
 
 /** Merges the last `days` day-files for a bot, oldest entry first (chronological). */
-export async function get_recent_days(botId: string, days: number): Promise<HealthCheckResult[]> {
+export async function get_recent_days<T = PresenceHistoryEntry>(botId: string, days: number): Promise<T[]> {
   const safeDays = Math.min(Math.max(Math.floor(days) || 1, 1), config.retentionDays);
   const today = new Date();
-  const results: HealthCheckResult[] = [];
+  const results: T[] = [];
 
   for (let i = safeDays - 1; i >= 0; i--) {
-    const dayResults = await read_day(botId, day_offset(today, i));
+    const dayResults = await read_day<T>(botId, day_offset(today, i));
     results.push(...dayResults);
   }
 
   return results;
 }
 
-/** Collapses chronological entries into marks, one per actual status change. */
-function to_status_marks(results: HealthCheckResult[]): StatusMark[] {
+/** Maps chronological entries into marks; by default collapses to one per actual status change,
+ * but can keep every presence event post (e.g. repeated `online`s after startup re-seeds). */
+function to_status_marks(results: PresenceHistoryEntry[], collapseRepeats = true): StatusMark[] {
   const marks: StatusMark[] = [];
   for (const entry of results) {
-    const last = marks[marks.length - 1];
-    if (!last || last.status !== entry.status) {
-      marks.push({ status: entry.status, time: entry.timestamp });
+    if (collapseRepeats) {
+      const last = marks[marks.length - 1];
+      if (last && last.status === entry.status) continue;
     }
+    marks.push({ status: entry.status, time: entry.timestamp, ...(entry.replayed ? { replayed: true } : {}) });
   }
   return marks;
 }
 
-/** A span during which the watchdog process was continuously alive, per heartbeat evidence alone. */
+/** A watchdog-down span, per heartbeat evidence: from a heartbeat to the next `startup` one. */
 type UpRange = { start: number; end: number };
 
-// A heartbeat only proves the process was alive at that instant; if the next one is
-// further away than this, treat everything in between as a real outage, not jitter.
-const WATCHDOG_GAP_THRESHOLD_MS = config.checkIntervalMs * 1.5;
-
-/** Maximal spans of continuous heartbeat coverage, derived purely from watchdog heartbeats. */
-function compute_up_ranges(watchdogResults: HealthCheckResult[], windowEndMs: number): UpRange[] {
-  const heartbeatTimes = watchdogResults
-    .map((result) => new Date(result.timestamp).getTime())
-    .filter((timestamp) => Number.isFinite(timestamp))
-    .sort((left, right) => left - right);
-  if (heartbeatTimes.length === 0) return [];
-
+function compute_unknown_ranges(
+  watchdogResults: WatchdogHeartbeat[],
+  windowStartMs: number,
+): UpRange[] {
+  const heartbeats = watchdogResults
+    .map((result) => ({ timeMs: new Date(result.timestamp).getTime(), isStartup: result.startup }))
+    .filter((heartbeat) => Number.isFinite(heartbeat.timeMs))
+    .sort((left, right) => left.timeMs - right.timeMs);
   const ranges: UpRange[] = [];
-  let rangeStart = heartbeatTimes[0]!;
-  let prev = heartbeatTimes[0]!;
 
-  for (let i = 1; i < heartbeatTimes.length; i++) {
-    const cur = heartbeatTimes[i]!;
-    if (cur - prev > WATCHDOG_GAP_THRESHOLD_MS) {
-      ranges.push({ start: rangeStart, end: prev });
-      rangeStart = cur;
-    }
-    prev = cur;
+  for (let i = 1; i < heartbeats.length; i++) {
+    const previous = heartbeats[i - 1]!;
+    const current = heartbeats[i]!;
+    if (!current.isStartup || current.timeMs <= previous.timeMs) continue;
+    const start = Math.max(previous.timeMs, windowStartMs);
+    if (current.timeMs > start) ranges.push({ start, end: current.timeMs });
   }
-
-  // Still within threshold of "now"? the last range stays open through windowEnd.
-  ranges.push({
-    start: rangeStart,
-    end: windowEndMs - prev > WATCHDOG_GAP_THRESHOLD_MS ? prev : windowEndMs,
-  });
 
   return ranges;
 }
 
-/** The up-range containing `timestampMs`, or null if it falls in a gap (no heartbeat coverage). */
-function up_range_covering(ranges: UpRange[], timestampMs: number): UpRange | null {
-  return ranges.find((range) => timestampMs >= range.start && timestampMs <= range.end) ?? null;
-}
-
-/**
- * Merges raw (uncollapsed) presence checks with watchdog up-ranges: a presence status is only
- * trusted to persist through a heartbeat-covered span. Once the watchdog goes down before the
- * next presence check, the status is cut short there and "unknown" takes over. A presence check
- * that itself lands inside an already-down span is kept as a zero-duration marker (real evidence
- * of that instant) but never extended, since there's no heartbeat coverage backing it.
- */
-function build_bot_timeline(
-  rawResults: HealthCheckResult[],
-  upRanges: UpRange[],
-  windowEndMs: number,
-): StatusMark[] {
-  const overlaid: StatusMark[] = [];
-
-  for (let i = 0; i < rawResults.length; i++) {
-    const cur = rawResults[i]!;
-    const curTimeMs = new Date(cur.timestamp).getTime();
-    const nextTimeMs = i + 1 < rawResults.length ? new Date(rawResults[i + 1]!.timestamp).getTime() : windowEndMs;
-
-    overlaid.push({ status: cur.status, time: cur.timestamp });
-
-    const range = up_range_covering(upRanges, curTimeMs);
-    if (!range) {
-      // No heartbeat coverage at this instant at all — can't trust it beyond itself.
-      overlaid.push({ status: "unknown", time: cur.timestamp });
-      continue;
-    }
-
-    const segEnd = Math.min(nextTimeMs, range.end);
-    if (segEnd < nextTimeMs) {
-      overlaid.push({ status: "unknown", time: new Date(segEnd).toISOString() });
-    }
-  }
-
-  return to_status_marks(overlaid.map((mark) => ({
-    status: mark.status,
-    last_seen: null,
-    latency_ms: null,
-    error: null,
-    timestamp: mark.time,
-    method: "presence",
-  })));
-}
-
 /** Fraction of `[windowStart, windowEnd]` spent "online", by time-weighting each mark's held duration. */
-function compute_uptime_pct(marks: StatusMark[], windowStart: Date, windowEnd: Date): number {
+function compute_uptime_pct(
+  marks: StatusMark[],
+  unknownRanges: UpRange[],
+  windowStart: Date,
+  windowEnd: Date,
+): number {
+  if (marks.length === 0) return 0;
+  const observedStart = new Date(Math.max(windowStart.getTime(), new Date(marks[0]!.time).getTime()));
   let onlineMs = 0;
-  let totalMs = 0;
+  let knownMs = Math.max(0, windowEnd.getTime() - observedStart.getTime());
+
+  for (const range of unknownRanges) {
+    const start = Math.max(range.start, observedStart.getTime());
+    const end = Math.min(range.end, windowEnd.getTime());
+    if (end > start) knownMs -= end - start;
+  }
 
   for (let i = 0; i < marks.length; i++) {
     const segStart = new Date(marks[i]!.time);
@@ -334,26 +313,96 @@ function compute_uptime_pct(marks: StatusMark[], windowStart: Date, windowEnd: D
     if (clippedEnd <= clippedStart) continue;
 
     const durationMs = clippedEnd.getTime() - clippedStart.getTime();
-    if (marks[i]!.status === "unknown") continue;
-    totalMs += durationMs;
-    if (marks[i]!.status === "online") onlineMs += durationMs;
+    if (marks[i]!.status === "offline") continue;
+    onlineMs += durationMs;
+    for (const range of unknownRanges) {
+      const unknownStart = Math.max(clippedStart.getTime(), range.start);
+      const unknownEnd = Math.min(clippedEnd.getTime(), range.end);
+      if (unknownEnd > unknownStart) onlineMs -= unknownEnd - unknownStart;
+    }
   }
 
-  return totalMs > 0 ? Math.round((onlineMs / totalMs) * 10000) / 100 : 0;
+  return knownMs > 0 ? Math.round((onlineMs / knownMs) * 10000) / 100 : 0;
 }
 
 /** Status-change timeline + time-weighted uptime % over the last `days` days. */
 export async function get_status_timeline(
   botId: string,
   days: number,
+  options?: { collapseRepeats?: boolean },
 ): Promise<{ uptime_pct: number; timeline: StatusMark[] }> {
   const results = await get_recent_days(botId, days);
   const windowEnd = new Date();
   const windowStart = new Date(windowEnd.getTime() - days * 24 * 60 * 60 * 1000);
-  const watchdogResults = await get_recent_days("watchdog", days);
-  const upRanges = compute_up_ranges(watchdogResults, windowEnd.getTime());
-  const timeline = build_bot_timeline(results, upRanges, windowEnd.getTime());
-  return { uptime_pct: compute_uptime_pct(timeline, windowStart, windowEnd), timeline };
+  const watchdogResults = await get_recent_days<WatchdogHeartbeat>("watchdog", days);
+  const unknownRanges = compute_unknown_ranges(watchdogResults, windowStart.getTime());
+  const timeline = to_status_marks(results, options?.collapseRepeats ?? true);
+  return { uptime_pct: compute_uptime_pct(timeline, unknownRanges, windowStart, windowEnd), timeline };
+}
+
+export interface BotStatusTimelinePage {
+  uptime_pct: number;
+  total: number;
+  page: number;
+  page_size: number;
+  timeline: StatusMark[];
+}
+
+/**
+ * Merged, deduped, paginated status timeline for one bot: real presence marks interleaved with
+ * synthetic watchdog boundary marks (`"${cause} offline"` at each offline range start, `"${cause}
+ * online"` at its end). Entries are sorted chronologically, consecutive identical statuses are
+ * collapsed, then the newest `pageSize` marks for the requested page are returned (recent-first).
+ * Uptime % is computed from presence marks plus watchdog unknown ranges — synthetic marks are never
+ * treated as uptime-relevant, keeping the calculation identical to before.
+ */
+export async function get_bot_status_timeline(
+  botId: string,
+  days: number,
+  pageSize: number,
+  page: number,
+): Promise<BotStatusTimelinePage> {
+  const results = await get_recent_days(botId, days);
+  const windowEnd = new Date();
+  const windowStart = new Date(windowEnd.getTime() - days * 24 * 60 * 60 * 1000);
+  const heartbeats = await get_sorted_heartbeats(days);
+  const unknownRanges = compute_unknown_ranges(
+    heartbeats.map(({ timeMs, ...heartbeat }) => heartbeat),
+    windowStart.getTime(),
+  );
+  const uptime_pct = compute_uptime_pct(
+    to_status_marks(results, false),
+    unknownRanges,
+    windowStart,
+    windowEnd,
+  );
+
+  const merged: StatusMark[] = [...to_status_marks(results, false)];
+  for (const offline of compute_offline_ranges(heartbeats, windowStart.getTime())) {
+    merged.push({ status: `${offline.cause} offline` as const, time: offline.from });
+    merged.push({ status: `${offline.cause} online` as const, time: offline.to });
+  }
+
+  // Chronological, then collapse consecutive identical statuses (e.g. repeated re-seed `online`s,
+  // or a watchdog boundary directly replacing a presence post).
+  merged.sort((left, right) => new Date(left.time).getTime() - new Date(right.time).getTime());
+  const deduped: StatusMark[] = [];
+  for (const mark of merged) {
+    const last = deduped[deduped.length - 1];
+    if (last && last.status === mark.status) continue;
+    deduped.push(mark);
+  }
+
+  const safePage = Math.max(1, Math.floor(page) || 1);
+  const recentFirst = deduped.reverse();
+  const start = (safePage - 1) * pageSize;
+  return {
+    uptime_pct,
+    total: deduped.length,
+    page: safePage,
+    page_size: pageSize,
+    timeline: recentFirst.slice(start, start + pageSize),
+  };
 }
 
 
@@ -361,7 +410,7 @@ export async function get_status_timeline(
 export async function get_day_page(
   botId: string,
   page: number,
-): Promise<{ date: string; results: HealthCheckResult[] }> {
+): Promise<{ date: string; results: PresenceHistoryEntry[] }> {
   const date = day_offset(new Date(), page);
   const results = await read_day(botId, date);
   return { date: format_day(date), results: results.reverse() };

@@ -1,18 +1,27 @@
 import { config } from "./lib/config"
-import { client, start_bot } from "./lib/bot"
+import { client, is_collecting_replay, is_gateway_connected, normalize_presence_status, start_bot } from "./lib/bot"
 import { start_server } from "./lib/server"
 import { append_result, append_watchdog_heartbeat, clear_last_alert, get_last_alert, get_latest_for, set_last_alert } from "./lib/cache"
 import type { Presence } from "discord.js"
-import type { HealthCheckResult } from "./lib/types"
+import type { HealthCheckResult, PresenceStatus } from "./lib/types"
 
 const ALERT_COOLDOWN_MS = 60 * 60 * 1000 // only re-ping the same ongoing outage once per hour
+
+// Presence posts reconciled from a gateway replay after a shard reconnect, buffered so the
+// "shard reconnected" message can list them. Times are replay arrival (no timestamps in replays).
+interface ReplayedChange {
+  botId: string
+  status: PresenceStatus
+  timestamp: string
+}
+let replayed_changes: ReplayedChange[] = []
 
 async function main() {
   await start_bot(handle_presence_update, handle_initial_statuses)
   start_server()
   console.log(`[server] listening on port ${ config.port }`)
 
-  // First heartbeat fires from the clientReady handler (before presence data is read);
+  // First heartbeat fires from the startup sequence (after presence data is read);
   // this just keeps the interval going afterward.
   setInterval(() => {
     run_check_loop().catch((err) => console.error("[healthcheck] loop error:", err))
@@ -25,29 +34,45 @@ async function handle_presence_update(presence: Presence): Promise<void> {
 
   const previous = await get_latest_for(botId)
   const timestamp = new Date().toISOString()
-  const isOffline = presence.status === "offline"
+  const status = normalize_presence_status(presence.status)
+  const replayed = is_collecting_replay()
+  const isOffline = status === "offline"
   const result: HealthCheckResult = {
-    status: isOffline ? "offline" : "online",
+    status,
     last_seen: isOffline ? previous?.last_seen ?? null : timestamp,
     latency_ms: null,
     error: null,
     timestamp,
     method: "presence",
+    replayed,
   }
 
+  if (replayed) {
+    replayed_changes.push({ botId, status, timestamp })
+  }
+
+  // Post the presence update first, then a startup:false heartbeat as the liveness marker, so the
+  // heartbeat always lands after the post. The alert is a side effect and must not affect timing.
   await append_result(botId, result)
-  console.log(`[presence] bot=${ botId } status=${ result.status }`)
+  console.log(`[presence] bot=${ botId } status=${ result.status }${ replayed ? " (replayed)" : "" }`)
+  await append_watchdog_heartbeat()
   await post_status_alert(botId, result, previous?.status ?? null)
 }
 
-async function handle_initial_statuses(initial: Record<string, HealthCheckResult>): Promise<void> {
+async function handle_initial_statuses(
+  initial: Record<string, HealthCheckResult>,
+  origin: "instance" | "shard",
+): Promise<void> {
+  // Stamp at write time, not the stale fetch time from get_initial_bot_statuses(), so these
+  // presence posts land AFTER the boundary heartbeat that precedes them in the timeline.
+  const timestamp = new Date().toISOString()
   for (const botId of config.botIds) {
     const result = initial[botId]
     if (!result) continue
-    await append_result(botId, result)
+    await append_result(botId, { ...result, timestamp })
     console.log(`[bot] startup status bot=${ botId } status=${ result.status }`)
   }
-  await post_startup_messages(initial)
+  await post_startup_messages(initial, origin)
 }
 
 main().catch((err) => {
@@ -59,6 +84,9 @@ main().catch((err) => {
 
 
 async function run_check_loop(): Promise<void> {
+  // Pause while the gateway is down so shard outages surface as real offline ranges in /watchdog;
+  // the re-seed sequence on reconnect closes the gap.
+  if (!is_gateway_connected()) return
   await append_watchdog_heartbeat()
 }
 
@@ -71,7 +99,7 @@ async function post_status_alert(
   previousStatus: HealthCheckResult["status"] | null,
 ): Promise<void> {
   const isOffline = result.status === "offline"
-  const isRecovery = result.status === "online" && previousStatus === "offline"
+  const isRecovery = result.status !== "offline" && result.status !== "unknown" && previousStatus === "offline"
   if (!isOffline && !isRecovery) return
   if (!config.botTargets[botId]?.ping) return
 
@@ -107,7 +135,10 @@ async function post_status_alert(
   }
 }
 
-async function post_startup_messages(initial: Record<string, HealthCheckResult>): Promise<void> {
+async function post_startup_messages(
+  initial: Record<string, HealthCheckResult>,
+  origin: "instance" | "shard",
+): Promise<void> {
   if (!config.logChannelId) return
 
   try {
@@ -117,9 +148,22 @@ async function post_startup_messages(initial: Record<string, HealthCheckResult>)
     const envLabel = config.isProduction ? "production" : "development"
     const statusLines = config.botIds.map((id) => {
       const result = initial[id]
-      const emoji = result?.status === "online" ? "🟢" : result?.status === "offline" ? "🔴" : "⚪"
+      const emoji = result && result.status !== "offline" && result.status !== "unknown" ? "🟢" : result?.status === "offline" ? "🔴" : "⚪"
       return `${ emoji } <@${ id }>: **${ result?.status ?? "unknown" }**`
     })
+
+    if (origin === "shard") {
+      // Replayed events carry no timestamps, so only the replay arrival time is appended as an approximation.
+      const replayLines = replayed_changes.map((change) =>
+        `• <@${ change.botId }>: **${ change.status }** at ${ change.timestamp } (replayed, time approximate)`,
+      )
+      replayed_changes = []
+      await channel.send(
+        `🟡 [${ envLabel }] shard reconnected — current bot statuses\n${ statusLines.join("\n") || "no bots configured" }` +
+          (replayLines.length ? `\nReplayed presence changes:\n${ replayLines.join("\n") }` : ""),
+      )
+      return
+    }
 
     await channel.send(
       `🟢 [${ envLabel }] health-check watchdog is online\n${ statusLines.join("\n") || "no bots configured" }`,

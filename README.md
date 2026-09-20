@@ -108,7 +108,8 @@ reloads the TypeScript source as you edit it. The `dev` script uses
 
 - `GET http://localhost:3000/` — plain-text list of endpoints
 - `GET http://localhost:3000/health` — liveness probe; returns `HealthResponse`
-- `GET http://localhost:3000/bots` — current Discord profiles plus watchdog heartbeat status; returns `BotsResponse`
+- `GET http://localhost:3000/bots` — current Discord profiles plus presence timelines and uptime; returns `BotsResponse`
+- `GET http://localhost:3000/watchdog` — current watchdog state and offline ranges; returns `WatchdogResponse`
 - `GET http://localhost:3000/status` — latest + last 5 days of history for all bots; returns `AllBotsStatusResponse`
 - `GET http://localhost:3000/status/:botId` — latest + last 7 days of history for one bot; returns `BotStatusResponse`
 - `GET http://localhost:3000/status/:botId/page/:number` — one calendar day of raw checks; returns `StatusPageResponse`
@@ -122,33 +123,29 @@ Replace `:botId` with a real configured bot ID. The page number is zero-based:
 These TypeScript types match the JSON responses and can be copied into a client:
 
 ```ts
-type HealthStatus = "online" | "offline" | "stale" | "unknown";
+// The bot's real Discord presence, as reported by the gateway — never assigned by us.
+export type PresenceStatus = "online" | "idle" | "dnd" | "offline";
+// PresenceStatus, plus "unknown" for when a check itself failed (bot not found, fetch error).
+export type HealthStatus = PresenceStatus | "unknown";
 
-type HealthCheckResult = {
+export type HealthCheckResult = {
    status: HealthStatus;
    last_seen: string | null;
    latency_ms: number | null;
    error: string | null;
    timestamp: string;
    method: "presence";
+   // True when this check was reconciled from a gateway replay after a shard reconnect
+   // (Discord sends no timestamps for replayed events, so the post is arrival-stamped).
+   replayed?: boolean;
 };
 
-type HourlyBucket = {
-   hour: string;
-   total: number;
-   online: number;
-   offline: number;
-   unknown: number;
-   uptime_pct: number;
-   had_offline: boolean;
-};
-
-type HealthResponse = {
+export type HealthResponse = {
    ok: boolean;
    uptime_s: number;
 };
 
-type BotsResponse = {
+export type BotsResponse = {
    bots: Array<{
       id: string;
       display_name: string | null;
@@ -159,35 +156,67 @@ type BotsResponse = {
       support_server: string;
       ping: boolean;
       error?: string;
-   }>;
-   watchdog: {
-      current: "online" | "offline";
-      last_seen: string | null;
-      hourly: Array<{
-         hour: string;
-         heartbeats: number;
-         was_online: boolean;
+      uptime_pct: number;
+      timeline: Array<{
+         status: PresenceStatus;
+         time: string;
+         replayed?: boolean;
       }>;
-   };
+   }>;
 };
 
-type AllBotsStatusResponse = {
+export type WatchdogResponse = {
+   current: "online" | "offline";
+   last_seen: string | null;
+   offlines: Array<{
+      from: string;
+      to: string;
+      // "instance" = process (re)started; "shard" = gateway reconnected after a drop.
+      cause: "instance" | "shard";
+   }>;
+   // Times the gateway shard reconnected after a drop (purely informational, not
+   // reconciled with bot uptime; replayed events carry no timestamps).
+   shardResumed: string[];
+};
+
+export type AllBotsStatusResponse = {
    days: number;
    bots: Record<string, {
       latest: HealthCheckResult | null;
-      hourly: HourlyBucket[];
+      uptime_pct: number;
+      // Total merged deduped marks for this bot (only the first 10 are in `timeline`).
+      total: number;
+      timeline: StatusMark[];
    }>;
 };
 
-type BotStatusResponse = {
+export type BotStatusResponse = {
    bot_id: string;
    days: number;
    latest: HealthCheckResult | null;
-   count: number;
-   hourly: HourlyBucket[];
+   uptime_pct: number;
+   page: number;
+   page_size: number;
+   total: number;
+   timeline: StatusMark[];
 };
 
-type StatusPageResponse = {
+// A single merged timeline mark: a real presence post, or a synthetic watchdog boundary.
+export type MergedStatus =
+   | PresenceStatus
+   | "instance offline"
+   | "instance online"
+   | "shard offline"
+   | "shard online";
+
+export type StatusMark = {
+   status: MergedStatus;
+   time: string;
+   // True when this post came from a gateway replay after a shard reconnect (arrival-stamped).
+   replayed?: boolean;
+};
+
+export type StatusPageResponse = {
    bot_id: string;
    page: number;
    date: string;
@@ -195,7 +224,7 @@ type StatusPageResponse = {
    results: HealthCheckResult[];
 };
 
-type ApiError = {
+export type ApiError = {
    error: string;
 };
 ```
@@ -219,6 +248,9 @@ const botId = "1450060292716494940";
 const botStatus = await fetch(`http://localhost:3000/status/${botId}`)
    .then((response) => response.json() as Promise<BotStatusResponse>);
 
+const botStatusPage2 = await fetch(`http://localhost:3000/status/${botId}?page=2`)
+   .then((response) => response.json() as Promise<BotStatusResponse>);
+
 const page = 0;
 const botDay = await fetch(`http://localhost:3000/status/${botId}/page/${page}`)
    .then((response) => response.json() as Promise<StatusPageResponse>);
@@ -233,18 +265,49 @@ for the configured `GUILD_ID` on startup.
 The Discord `/status` command reports the latest cached status, check time,
 latency, and errors for each monitored bot.
 
-The watchdog writes a heartbeat at the start of each check cycle. Its
-`/bots.watchdog.current` status is `online` when the latest heartbeat is within
-`CHECK_INTERVAL_MS`; after the next expected heartbeat is missed, it becomes
-`offline`. Its hourly buckets report `was_online: true` when at least one
-heartbeat was recorded during that hour, and `false` when no heartbeat was
-recorded. Monitored bot presence changes are also handled immediately through
-Discord's Gateway `presenceUpdate` event. The periodic check remains as a
-fallback reconciliation path.
+The watchdog writes a heartbeat every `CHECK_INTERVAL_MS` and after every
+gateway event. On startup (`instance`) it waits for guild presence data, then
+writes an `startup:"instance"` heartbeat, posts the bot statuses, and writes a
+regular heartbeat before the periodic loop takes over. When a gateway shard
+drops while the process stays up (connection lost / heavy restart), the
+periodic heartbeats are paused, so the outage shows up as a real offline range;
+on reconnect (`shard` / resume or re-identify) it writes a `startup:"shard"`
+heartbeat first to bound the gap, re-fetches fresh presence, posts the bot
+statuses, and resumes periodic heartbeats. Any later startup heartbeat closes
+an offline range from the previous heartbeat to that startup heartbeat. Each
+`offlines[]` entry in `/watchdog` is tagged with the cause of its gap: an
+`"instance"` gap means the whole process (re)started (e.g. a deploy or crash
+restart), a `"shard"` gap means the gateway dropped and later reconnected while
+the process stayed up. If a drop ends with a full process restart, the closing
+boundary is the restart's `"instance"` heartbeat, so it is labeled `"instance"`.
 
-The `/status` and `/status/:botId` responses can get large (roughly 1-1.5 MB
-per bot at a 1-minute check interval); the server gzips responses over 1 KB
-when the client sends `Accept-Encoding: gzip`.
+Discord replayed events after a shard reconnect carry no timestamps: posts
+reconciled from the replay are arrival-stamped and flagged `replayed: true`
+(both in `/status`/`:botId` timelines and in the "shard reconnected" Discord
+message, which lists the replayed presence changes with an "approximate"
+label). Between the drop and the reconnect the gateway delivers nothing, so
+that span is excluded from bot uptime as unknown time.
+
+`/status` and `/status/:botId` timelines pre-merge the bot's Discord presence
+posts with the `/watchdog` offline ranges: each offline range contributes two
+synthetic marks — `` `${cause} offline` `` at its `from` and `` `${cause} online` ``
+at its `to` (`"instance offline"`/`"instance online"`/`"shard offline"`/`"shard
+online"`). The merged marks are sorted chronologically, consecutive identical
+statuses are collapsed (so repeated re-seed `online`s disappear), and the
+result is listed most recent first. `/status` returns the first 10 marks per bot
+with a `total` count; `/status/:botId` pages through all of them, 50 per page,
+via `?page=2` (and so on), echoing `page`, `page_size`, and `total`. `/bots`
+timelines stay presence-only (collapse to presence changes only, chronological).
+Uptime excludes watchdog-down ranges as unknown time.
+Monitored bot presence changes are also handled immediately through Discord's
+Gateway `presenceUpdate` event — the post is written, a liveness heartbeat
+follows, then a status alert is sent (alerts are ping-gated per-bot and never
+affect timing). The periodic check remains as a fallback reconciliation path.
+
+The `/status` and `/status/:botId` merged timelines are paginated, so the
+responses are now bounded (10 and 50 marks per response respectively); the
+server still gzips responses over 1 KB when the client sends
+`Accept-Encoding: gzip`.
 
 ## Docker production deployment
 

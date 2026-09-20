@@ -1,9 +1,15 @@
 import { Client, GatewayIntentBits, Partials, SlashCommandBuilder } from "discord.js"
-import type { Interaction, Presence } from "discord.js"
+import type { Interaction, Presence, PresenceStatus as DiscordPresenceStatus } from "discord.js"
 import { config } from "./config"
 import { append_watchdog_heartbeat, get_cache_size_bytes, get_latest_all } from "./cache"
 import { get_runtime_memory } from "./runtime"
-import type { HealthCheckResult } from "./types"
+import type { HealthCheckResult, PresenceStatus } from "./types"
+
+// Discord only reports "invisible" to the invisible user's own client; other observers
+// (us, watching bots) always see "offline" instead, but normalize defensively anyway.
+export function normalize_presence_status(status: DiscordPresenceStatus): PresenceStatus {
+  return status === "invisible" ? "offline" : status
+}
 
 // GuildPresences and GuildMembers are privileged intents — enable them for this
 // bot in the Discord Developer Portal (Bot > Privileged Gateway Intents).
@@ -124,7 +130,9 @@ async function get_initial_bot_statuses(): Promise<Record<string, HealthCheckRes
 
   try {
     const guild = client.guilds.cache.get(config.guildId) ?? await client.guilds.fetch(config.guildId)
-    const members = await guild.members.fetch({ user: config.botIds })
+    // withPresences forces the multi-member fetch path (fresh REQUEST_GUILD_MEMBERS), so after a shard
+    // reconnect we always hit the API for a genuinely fresh snapshot rather than returning stale cache.
+    const members = await guild.members.fetch({ user: config.botIds, withPresences: true })
 
     for (const botId of config.botIds) {
       const member = members.get(botId)
@@ -140,12 +148,11 @@ async function get_initial_bot_statuses(): Promise<Record<string, HealthCheckRes
         continue
       }
 
-      const presenceStatus = member.presence?.status ?? null
-      // A bot with an active but invisible status looks identical to offline here.
-      const isOnline = presenceStatus !== null && presenceStatus !== "offline"
+      // No presence data at all (e.g. presence intent gap) is treated the same as offline.
+      const status = member.presence ? normalize_presence_status(member.presence.status) : "offline"
       results[botId] = {
-        status: isOnline ? "online" : "offline",
-        last_seen: isOnline ? timestamp : null,
+        status,
+        last_seen: status === "offline" ? null : timestamp,
         latency_ms: null,
         error: null,
         timestamp,
@@ -169,19 +176,104 @@ async function get_initial_bot_statuses(): Promise<Record<string, HealthCheckRes
   return results
 }
 
+// Gates the per-event heartbeat listener until the startup sequence (heartbeat + status + heartbeat) lands.
+let startup_heartbeat_sent = false
+// True once the instance startup sequence has completed; distinguishes first-connect READY from
+// later re-identifies (which are handled as a "shard" re-seed).
+let instance_started = false
+// Whether a gateway shard is currently connected; the periodic check loop pauses heartbeats while
+// false so shard outages surface as real offline ranges.
+let gateway_connected = false
+// Set while Discord replays missed events right after a shard reconnect; posts reconciled in this
+// window are flagged `replayed` (approximation — the replay carries no timestamps).
+let collecting_replay = false
+
+export function is_gateway_connected(): boolean {
+  return gateway_connected
+}
+
+export function is_collecting_replay(): boolean {
+  return collecting_replay
+}
+
+/**
+ * Re-seeds presence-derived bot statuses, then closes any prior gap. For an "instance" startup the
+ * boundary heartbeat goes out after presence is verified; for a "shard" reconnect the "shard"
+ * heartbeat is written FIRST so the reconnect gap is bounded before any replayed-event heartbeats
+ * can interleave. Either way the bot status is posted afterward, then a regular heartbeat covers the
+ * span until the periodic check loop takes over.
+ */
+async function refresh_presence_and_heartbeat(
+  on_ready: (initial: Record<string, HealthCheckResult>, origin: "instance" | "shard") => Promise<void>,
+  origin: "instance" | "shard",
+  replayed_events?: number,
+): Promise<void> {
+  if (origin === "shard") {
+    await append_watchdog_heartbeat(new Date().toISOString(), "shard", replayed_events)
+  }
+  const initial = await get_initial_bot_statuses()
+  if (origin === "instance") {
+    await append_watchdog_heartbeat(new Date().toISOString(), "instance")
+  }
+  await on_ready(initial, origin)
+  await append_watchdog_heartbeat()
+  startup_heartbeat_sent = true
+}
+
 export async function start_bot(
   on_presence_update: (presence: Presence) => Promise<void>,
-  on_ready: (initial: Record<string, HealthCheckResult>) => Promise<void>,
+  on_ready: (initial: Record<string, HealthCheckResult>, origin: "instance" | "shard") => Promise<void>,
 ): Promise<void> {
+  let resolve_ready!: () => void
+  let reject_ready!: (error: unknown) => void
+  const ready = new Promise<void>((resolve, reject) => {
+    resolve_ready = resolve
+    reject_ready = reject
+  })
+
   client.once("clientReady", (readyClient) => {
     console.log(`[bot] logged in as ${ readyClient.user.tag }`)
     register_commands()
-    // Heartbeat closes the prior gap *before* any presence data is read, so
-    // presence marks never land inside an unknown window.
-    append_watchdog_heartbeat()
-      .then(() => get_initial_bot_statuses())
-      .then(on_ready)
-      .catch((error) => console.error("[bot] failed to seed initial bot statuses:", error))
+    instance_started = true
+    gateway_connected = true
+    refresh_presence_and_heartbeat(on_ready, "instance").catch((error) => {
+      console.error("[bot] failed to seed initial bot statuses:", error)
+      reject_ready(error)
+    }).then(() => {
+      resolve_ready()
+    })
+  })
+
+  // Fires when a shard reconnects to the gateway after a drop; the session resumes and Discord
+  // replays missed events (no timestamps). Presence data may be stale, so re-seed it — the "shard"
+  // heartbeat is written first to bound the reconnect gap before replayed-event heartbeats can land.
+  client.on("shardResume", (_shardId, replayedEvents) => {
+    console.log(`[bot] shard resumed after reconnect (replayed ${ replayedEvents } events)`)
+    gateway_connected = true
+    collecting_replay = true
+    refresh_presence_and_heartbeat(on_ready, "shard", replayedEvents).catch((error) => {
+      console.error("[bot] failed to refresh bot statuses after reconnect:", error)
+    }).finally(() => {
+      collecting_replay = false
+    })
+  })
+
+  // A shard got a fresh READY. First connect is owned by clientReady ("instance"); any later READY
+  // means the session could not resume after a drop, so run the same "shard" re-seed sequence.
+  client.on("shardReady", (_shardId) => {
+    gateway_connected = true
+    if (!instance_started) return
+    console.log("[bot] shard re-identified after reconnect")
+    collecting_replay = true
+    refresh_presence_and_heartbeat(on_ready, "shard").catch((error) => {
+      console.error("[bot] failed to refresh bot statuses after re-identify:", error)
+    }).finally(() => {
+      collecting_replay = false
+    })
+  })
+
+  client.on("shardDisconnect", (_closeEvent) => {
+    gateway_connected = false
   })
 
   client.on("interactionCreate", (interaction) => {
@@ -199,9 +291,24 @@ export async function start_bot(
     })
   })
 
+  // Every gateway dispatch is evidence that the watchdog process is connected. Monitored presence
+  // updates are handled by handle_presence_update (which owns the post-then-heartbeat ordering);
+  // every other event heartbeats here to prove liveness.
+  client.on("raw", (data: { t?: string; d?: { user?: { id?: string } } }) => {
+    if (!startup_heartbeat_sent) return
+    if (data.t === "PRESENCE_UPDATE") {
+      const userId = data.d?.user?.id
+      if (userId && config.botIds.includes(userId)) return
+    }
+    append_watchdog_heartbeat().catch((error) => {
+      console.error("[bot] failed to write event heartbeat:", error)
+    })
+  })
+
   client.on("error", (error) => {
     console.error("[bot] client error:", error)
   })
 
   await client.login(config.discordToken)
+  await ready
 }
