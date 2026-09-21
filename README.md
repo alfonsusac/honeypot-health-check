@@ -93,6 +93,26 @@ Which bots to monitor and whether each one alerts is configured in
    overrides; without this permission, Discord will not deliver the
    `@everyone` ping even though the bot sends it with `allowedMentions`.
 
+`/health` and `/status` are registered globally with both **server install**
+and **user install** integration types, so they also work in DMs for anyone
+who installs the app to their own account (no server membership needed for the
+commands; the watchdog's guild-side monitoring is unchanged). To enable this:
+
+- In the [Developer Portal](https://discord.com/developers/applications), open
+  the app's **Installation** page and enable both **User Install** and
+  **Server Install** install contexts.
+- Make sure the **`applications.commands`** OAuth2 scope is included in the
+  install URL/authorization scopes.
+- Share the generated user-install link; anyone who installs it can run
+  `/health` and `/status` in their DMs with the bot.
+
+User-install here still means a bot application in the portal — Discord does
+not support attaching commands to a personal user account (self-botting).
+
+Because the commands are registered globally, note that Discord caches their
+availability: changes can take from a few minutes up to about an hour to
+propagate.
+
 ## Local development
 
 ```bash

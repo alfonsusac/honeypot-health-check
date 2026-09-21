@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, Partials, SlashCommandBuilder } from "discord.js"
+import { ApplicationIntegrationType, Client, GatewayIntentBits, InteractionContextType, Partials, SlashCommandBuilder } from "discord.js"
 import type { Interaction, Presence, PresenceStatus as DiscordPresenceStatus } from "discord.js"
 import { config } from "./config"
 import { append_watchdog_heartbeat, get_cache_size_bytes, get_latest_all } from "./cache"
@@ -63,11 +63,19 @@ export async function get_monitored_bot_profiles(): Promise<Array<{
   }))
 }
 
-const health_command = new SlashCommandBuilder()
+// User-install (DM) + guild-install support: commands register globally and work both in the
+// watchdog's server and in DMs for anyone who installs the app to their account.
+function set_install_contexts(builder: SlashCommandBuilder): SlashCommandBuilder {
+  return builder
+    .setIntegrationTypes(ApplicationIntegrationType.GuildInstall, ApplicationIntegrationType.UserInstall)
+    .setContexts(InteractionContextType.Guild, InteractionContextType.BotDM, InteractionContextType.PrivateChannel)
+}
+
+const health_command = set_install_contexts(new SlashCommandBuilder())
   .setName("health")
   .setDescription("Show this watchdog's cache and memory usage")
 
-const status_command = new SlashCommandBuilder()
+const status_command = set_install_contexts(new SlashCommandBuilder())
   .setName("status")
   .setDescription("Show the current status of monitored bots")
 
@@ -84,7 +92,9 @@ function format_bytes(bytes: number): string {
 }
 
 function register_commands(): void {
-  client.application?.commands.set([ health_command, status_command ], config.guildId).catch((error) => {
+  // Global registration (no guildId): required for user-install commands, and they still appear
+  // in every server the app is added to via the GuildInstall integration type.
+  client.application?.commands.set([ health_command, status_command ]).catch((error) => {
     console.error("[bot] failed to register application commands:", error)
   })
 }
