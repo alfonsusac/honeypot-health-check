@@ -1,5 +1,5 @@
 import { config } from "./lib/config"
-import { client, is_collecting_replay, is_gateway_connected, normalize_presence_status, start_bot } from "./lib/bot"
+import { client, get_pre_outage_latest, is_collecting_replay, is_gateway_connected, normalize_presence_status, start_bot } from "./lib/bot"
 import { start_server } from "./lib/server"
 import { append_result, append_watchdog_heartbeat, clear_last_alert, get_last_alert, get_latest_for, set_last_alert } from "./lib/cache"
 import type { Presence } from "discord.js"
@@ -15,6 +15,14 @@ interface ReplayedChange {
   timestamp: string
 }
 let replayed_changes: ReplayedChange[] = []
+
+// A bot whose presence changed across a shard disconnect/reconnect, for the reconnect alert.
+interface ShardChange {
+  botId: string
+  old: HealthCheckResult["status"] | null
+  new: HealthCheckResult["status"] | null
+  replayed: boolean
+}
 
 async function main() {
   await start_bot(handle_presence_update, handle_initial_statuses)
@@ -63,6 +71,33 @@ async function handle_initial_statuses(
   initial: Record<string, HealthCheckResult>,
   origin: "instance" | "shard",
 ): Promise<void> {
+  let changed: ShardChange[] = []
+  if (origin === "shard") {
+    // Diff against the pre-outage baseline captured at disconnect; replay/re-seed writes already
+    // re-touched latest.json, so a fresh get_latest_for() read would be polluted.
+    const baseline = get_pre_outage_latest()
+    const fallback: Record<string, HealthCheckResult> = {}
+    if (!baseline) {
+      for (const botId of config.botIds) {
+        const current = await get_latest_for(botId)
+        if (current) fallback[botId] = current
+      }
+    }
+    const previousFor = (botId: string): HealthCheckResult | null => (baseline ?? fallback)[botId] ?? null
+    const replayedBotIds = new Set(replayed_changes.map((change) => change.botId))
+    changed = config.botIds
+      .map((botId) => {
+        const result = initial[botId]
+        return {
+          botId,
+          old: previousFor(botId)?.status ?? null,
+          new: result?.status ?? null,
+          replayed: replayedBotIds.has(botId),
+        }
+      })
+      .filter((change) => change.old !== change.new || change.replayed)
+  }
+
   // Stamp at write time, not the stale fetch time from get_initial_bot_statuses(), so these
   // presence posts land AFTER the boundary heartbeat that precedes them in the timeline.
   const timestamp = new Date().toISOString()
@@ -72,7 +107,7 @@ async function handle_initial_statuses(
     await append_result(botId, { ...result, timestamp })
     console.log(`[bot] startup status bot=${ botId } status=${ result.status }`)
   }
-  await post_startup_messages(initial, origin)
+  await post_startup_messages(initial, origin, changed)
 }
 
 main().catch((err) => {
@@ -101,7 +136,7 @@ async function post_status_alert(
   const isOffline = result.status === "offline"
   const isRecovery = result.status !== "offline" && result.status !== "unknown" && previousStatus === "offline"
   if (!isOffline && !isRecovery) return
-  if (!config.botTargets[botId]?.ping) return
+  if (!config.botTargets[botId]?.should_ping) return
 
   if (isOffline) {
     const lastAlertAt = await get_last_alert(botId)
@@ -138,6 +173,7 @@ async function post_status_alert(
 async function post_startup_messages(
   initial: Record<string, HealthCheckResult>,
   origin: "instance" | "shard",
+  changed: ShardChange[] = [],
 ): Promise<void> {
   if (!config.logChannelId) return
 
@@ -146,24 +182,38 @@ async function post_startup_messages(
     if (!channel || !channel.isTextBased() || !("send" in channel)) return
 
     const envLabel = config.isProduction ? "production" : "development"
+
+    if (origin === "shard") {
+      replayed_changes = []
+
+      // Only alert when some bot's presence actually changed across the outage.
+      if (changed.length === 0) {
+        console.log("[index] shard reconnected with no presence changes — skipped alert")
+        return
+      }
+
+      // Replayed events carry no timestamps, so no times are shown; replay-sourced changes are
+      // just marked "replayed" (arrival order is the only approximation).
+      const changeLines = changed.map((change) => {
+        const emoji = change.new === "offline" ? "🔴" : change.new === "unknown" ? "🟡" : "🟢"
+        const details: string[] = []
+        if (change.old && change.old !== change.new) details.push(`was ${ change.old }`)
+        if (change.replayed) details.push("replayed — order approximate")
+        const suffix = details.length ? ` (${ details.join(", ") })` : ""
+        return `${ emoji } <@${ change.botId }>: **${ change.new ?? "unknown" }**${ suffix }`
+      })
+
+      await channel.send(
+        `🟡 [${ envLabel }] shard reconnected — presence changes\n${ changeLines.join("\n") }`,
+      )
+      return
+    }
+
     const statusLines = config.botIds.map((id) => {
       const result = initial[id]
       const emoji = result && result.status !== "offline" && result.status !== "unknown" ? "🟢" : result?.status === "offline" ? "🔴" : "⚪"
       return `${ emoji } <@${ id }>: **${ result?.status ?? "unknown" }**`
     })
-
-    if (origin === "shard") {
-      // Replayed events carry no timestamps, so only the replay arrival time is appended as an approximation.
-      const replayLines = replayed_changes.map((change) =>
-        `• <@${ change.botId }>: **${ change.status }** at ${ change.timestamp } (replayed, time approximate)`,
-      )
-      replayed_changes = []
-      await channel.send(
-        `🟡 [${ envLabel }] shard reconnected — current bot statuses\n${ statusLines.join("\n") || "no bots configured" }` +
-          (replayLines.length ? `\nReplayed presence changes:\n${ replayLines.join("\n") }` : ""),
-      )
-      return
-    }
 
     await channel.send(
       `🟢 [${ envLabel }] health-check watchdog is online\n${ statusLines.join("\n") || "no bots configured" }`,

@@ -26,20 +26,20 @@ sent:
 export const botTargets: Record<string, {
   author: string;
   support_server: string;
-  ping: boolean;
+  should_ping: boolean;
 }> = {
    "1450060292716494940": {
       author: "author name",
       support_server: "https://discord.gg/example",
-      ping: true,
+      should_ping: true,
    },
 };
 ```
 
 All monitored bots are checked together in one API call per interval. Each bot
 gets its own cached history. Leave `support_server` empty when a bot has no
-public support server. Set `ping: false` to monitor and cache a bot without
-sending offline or recovery alerts for it.
+public support server. Set `should_ping: false` to monitor and cache a bot
+without sending offline or recovery alerts for it.
 
 ## Folder structure
 
@@ -118,124 +118,11 @@ Replace `:botId` with a real configured bot ID. Both bot timelines are
 bounded by time. Successful JSON responses use HTTP
 `200`. Unknown bot IDs return HTTP `404` with `{ error: string }`.
 
-### API response types
+### API types + usage
 
-These TypeScript types match the JSON responses and can be copied into a client:
-
-```ts
-// The bot's real Discord presence, as reported by the gateway — never assigned by us.
-export type PresenceStatus = "online" | "idle" | "dnd" | "offline";
-// PresenceStatus, plus "unknown" for when a check itself failed (bot not found, fetch error).
-export type HealthStatus = PresenceStatus | "unknown";
-
-export type HealthCheckResult = {
-   status: HealthStatus;
-   last_seen: string | null;
-   latency_ms: number | null;
-   error: string | null;
-   timestamp: string;
-   method: "presence";
-   // True when this check was reconciled from a gateway replay after a shard reconnect
-   // (Discord sends no timestamps for replayed events, so the post is arrival-stamped).
-   replayed?: boolean;
-};
-
-export type HealthResponse = {
-   ok: boolean;
-   uptime_s: number;
-};
-
-// A single merged timeline mark: a real presence post, or a synthetic watchdog boundary.
-export type MergedStatus =
-   | PresenceStatus
-   | "instance offline"
-   | "instance online"
-   | "shard offline"
-   | "shard online";
-
-export type StatusMark = {
-   status: MergedStatus;
-   time: string;
-   // True when this post came from a gateway replay after a shard reconnect (arrival-stamped).
-   replayed?: boolean;
-};
-
-export type BotsResponse = {
-   bots: Array<{
-      id: string;
-      display_name: string | null;
-      username: string;
-      tag: string;
-      icon: string | null;
-      author: string;
-      support_server: string;
-      ping: boolean;
-      error?: string;
-      latest: HealthCheckResult | null;
-      uptime_pct: number;
-      // The 10 most recent merged/deduped status marks.
-      timeline: StatusMark[];
-   }>;
-};
-
-export type WatchdogResponse = {
-   current: "online" | "offline";
-   last_seen: string | null;
-   offlines: Array<{
-      from: string;
-      to: string;
-      // "instance" = process (re)started; "shard" = gateway reconnected after a drop.
-      cause: "instance" | "shard";
-   }>;
-   // Times the gateway shard reconnected after a drop (purely informational, not
-   // reconciled with bot uptime; replayed events carry no timestamps).
-   shardResumed: string[];
-};
-
-export type BotStatusResponse = {
-   id: string;
-   display_name: string | null;
-   username: string;
-   tag: string;
-   icon: string | null;
-   author: string;
-   support_server: string;
-   ping: boolean;
-   error?: string;
-   latest: HealthCheckResult | null;
-   uptime_pct: number;
-   page: number;
-   page_size: number;
-   total: number;
-   timeline: StatusMark[];
-};
-
-export type ApiError = {
-   error: string;
-};
-```
-
-### Copy-paste fetch examples
-
-`fetch()` returns a `Response`, so call `.json()` on it. In TypeScript, the
-type assertion belongs after parsing the JSON:
-
-```ts
-const health = await fetch("http://localhost:3000/health")
-   .then((response) => response.json() as Promise<HealthResponse>);
-
-const bots = await fetch("http://localhost:3000/bots")
-   .then((response) => response.json() as Promise<BotsResponse>);
-
-const botId = "1450060292716494940";
-const bot = await fetch(`http://localhost:3000/bot/${botId}`)
-   .then((response) => response.json() as Promise<BotStatusResponse>);
-
-const botPage2 = await fetch(`http://localhost:3000/bot/${botId}?page=2`)
-   .then((response) => response.json() as Promise<BotStatusResponse>);
-```
-
-For production, replace `http://localhost:3000` with the VPS URL or domain.
+The client-side TypeScript types and copy-paste fetch examples live in
+[examples/usage.ts](examples/usage.ts). The types match the JSON responses and
+can be copied into (or imported by) a client that consumes the API.
 
 The Discord `/health` command reports the total size of the local cache and
 the watchdog process's current memory usage (RSS). The command is registered
@@ -278,13 +165,14 @@ by time: each bot keeps up to `historyEntryCap` (2000) presence posts and the
 watchdog keeps up to `watchdogHeartbeatCap` (20000) heartbeats, dropping the
 oldest past the cap — see [src/config.ts](src/config.ts). `/bots` returns the 10
 most recent marks per bot (no pagination); `/bot/:botId` pages through all of
-them, 50 per page, via `?page=2` (and so on), echoing `page`, `page_size`, and
-`total`.
+them, 50 per page, via `?page=2` (and so on), echoing `page`, `page_size`,
+`first_page_index`, `total`, and `total_pages` (pages are 1-indexed, so
+`first_page_index` is `1` and item offset is `(page - 1) * page_size`).
 Uptime excludes watchdog-down ranges as unknown time and is measured over each
 bot's retained history span (its oldest kept mark to now).
 Monitored bot presence changes are also handled immediately through Discord's
 Gateway `presenceUpdate` event — the post is written, a liveness heartbeat
-follows, then a status alert is sent (alerts are ping-gated per-bot and never
+follows, then a status alert is sent (alerts are @ping-gated per-bot and never
 affect timing). The periodic check remains as a fallback reconciliation path.
 
 The `/bots` and `/bot/:botId` merged timelines are count-bounded (10 and 50

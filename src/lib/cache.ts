@@ -273,8 +273,10 @@ function compute_uptime_pct(
 export interface BotStatusTimelinePage {
   uptime_pct: number;
   total: number;
+  total_pages: number;
   page: number;
   page_size: number;
+  first_page_index: 1;
   timeline: StatusMark[];
 }
 
@@ -327,8 +329,10 @@ export async function get_bot_status_timeline(
   return {
     uptime_pct,
     total: deduped.length,
+    total_pages: Math.ceil(deduped.length / pageSize),
     page: safePage,
     page_size: pageSize,
+    first_page_index: 1 as const,
     timeline: recentFirst.slice(start, start + pageSize),
   };
 }

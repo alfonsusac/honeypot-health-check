@@ -8,7 +8,8 @@
   "scripts": {
     "start": "NODE_ENV=production bun run src/index.ts",
     "dev": "NODE_ENV=development bun --watch run src/index.ts",
-    "prod:pull": "git pull origin main && docker compose pull",
+    "prod:pull": "git pull origin main && docker compose pull && docker compose up -d",
+    "prod:deploy_fresh": "docker compose stop && sudo rm -rf cache && mkdir -p cache && sudo chown -R 1000:1000 cache && docker compose up -d",
     "prod:deploy": "git pull origin main && docker compose pull && docker compose up -d && docker compose ps && docker compose logs -f",
     "typecheck": "bun x tsc --noEmit"
   },

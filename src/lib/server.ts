@@ -88,7 +88,7 @@ export function start_server() {
         const profiles = await get_monitored_bot_profiles();
         const profile = profiles.find((candidate) => candidate.id === botId);
         const latest = await get_latest_for(botId);
-        const { uptime_pct, page: resolvedPage, page_size, total, timeline } = await get_bot_status_timeline(
+        const { uptime_pct, page: resolvedPage, page_size, total_pages, first_page_index, total, timeline } = await get_bot_status_timeline(
           botId,
           STATUS_BOT_PAGE_SIZE,
           page,
@@ -100,6 +100,8 @@ export function start_server() {
             uptime_pct,
             page: resolvedPage,
             page_size,
+            first_page_index,
+            total_pages,
             total,
             timeline,
           },

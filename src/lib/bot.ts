@@ -30,7 +30,7 @@ export async function get_monitored_bot_profiles(): Promise<Array<{
   icon: string | null
   author: string
   support_server: string
-  ping: boolean
+  should_ping: boolean
   error?: string
 }>> {
   return Promise.all(config.botIds.map(async (id) => {
@@ -45,7 +45,7 @@ export async function get_monitored_bot_profiles(): Promise<Array<{
         icon: user.displayAvatarURL({ extension: "png", size: 256 }),
         author: metadata.author,
         support_server: metadata.support_server,
-        ping: metadata.ping,
+        should_ping: metadata.should_ping,
       }
     } catch (error) {
       return {
@@ -56,7 +56,7 @@ export async function get_monitored_bot_profiles(): Promise<Array<{
         icon: null,
         author: metadata.author,
         support_server: metadata.support_server,
-        ping: metadata.ping,
+        should_ping: metadata.should_ping,
         error: error instanceof Error ? error.message : String(error),
       }
     }
@@ -196,6 +196,14 @@ export function is_collecting_replay(): boolean {
   return collecting_replay
 }
 
+// Snapshot of bot statuses taken at shard disconnect — the true pre-outage state, captured before
+// any replay/re-seed writes touch the cache. Used to diff presence changes on the reconnect alert.
+let pre_outage_latest: Record<string, HealthCheckResult> | null = null
+
+export function get_pre_outage_latest(): Record<string, HealthCheckResult> | null {
+  return pre_outage_latest
+}
+
 /**
  * Re-seeds presence-derived bot statuses, then closes any prior gap. For an "instance" startup the
  * boundary heartbeat goes out after presence is verified; for a "shard" reconnect the "shard"
@@ -274,6 +282,13 @@ export async function start_bot(
 
   client.on("shardDisconnect", (_closeEvent) => {
     gateway_connected = false
+    // Best-effort capture of the pre-outage statuses for the reconnect alert's change diff.
+    get_latest_all().then((latest) => {
+      pre_outage_latest = latest
+    }).catch((error) => {
+      console.error("[bot] failed to capture pre-outage statuses:", error)
+      pre_outage_latest = null
+    })
   })
 
   client.on("interactionCreate", (interaction) => {
