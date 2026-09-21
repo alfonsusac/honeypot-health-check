@@ -1,5 +1,6 @@
+import type { Server } from "bun";
 import { config } from "./config";
-import { get_monitored_bot_profiles } from "./bot";
+import { client, get_monitored_bot_profiles } from "./bot";
 import { get_bot_status_timeline, get_latest_all, get_latest_for, get_watchdog_status } from "./cache";
 
 const ENDPOINTS_TEXT = `honeypot-health-check API
@@ -39,10 +40,40 @@ function text(body: string, status = 200): Response {
   return new Response(body, { status, headers: { "content-type": "text/plain; charset=utf-8" } });
 }
 
+function get_client_ip(req: Request, server: Server<unknown>): string | null {
+  const proxied = req.headers.get("cf-connecting-ip")
+    ?? req.headers.get("x-real-ip")
+    ?? req.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
+  return proxied ?? server.requestIP(req)?.address ?? null;
+}
+
+// /bots is meant for build/revalidate-time consumers only; log any hit to the log channel so
+// unexpected access is visible. Fire-and-forget — never blocks or fails the response.
+function notify_bots_endpoint(req: Request, server: Server<unknown>): void {
+  const channelId = config.logChannelId;
+  if (!channelId) return;
+  const referer = req.headers.get("referer") ?? "none";
+  const proxiedIp = req.headers.get("cf-connecting-ip")
+    ?? req.headers.get("x-real-ip")
+    ?? req.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
+    ?? null;
+
+  void (async () => {
+    try {
+      const ip = proxiedIp ?? get_client_ip(req, server) ?? "unknown";
+      const channel = await client.channels.fetch(channelId);
+      if (!channel || !channel.isTextBased() || !("send" in channel)) return;
+      await channel.send(`/bots endpoint called. referer: ${ referer }. ip: ${ ip }.`);
+    } catch (error) {
+      console.error("[server] failed to notify /bots endpoint call:", error);
+    }
+  })();
+}
+
 export function start_server() {
   return Bun.serve({
     port: config.port,
-    async fetch(req) {
+    async fetch(req, server) {
       const url = new URL(req.url);
 
       if (req.method !== "GET") {
@@ -58,6 +89,7 @@ export function start_server() {
       }
 
       if (url.pathname === "/bots") {
+        notify_bots_endpoint(req, server);
         const profiles = await get_monitored_bot_profiles();
         const latest = await get_latest_all();
         const bots = await Promise.all(profiles.map(async (bot) => {
