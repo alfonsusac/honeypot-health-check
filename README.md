@@ -74,6 +74,9 @@ See [.env.example](.env.example):
 | `GUILD_ID`            | yes      | Server ID where the monitored bots live            |
 | `CHECK_INTERVAL_MS`   | no       | Interval between checks (default `150000`)         |
 | `PORT`                | no       | HTTP API port (default `3000`)                     |
+| `PAGE_SIZE`           | no       | Page size for `/bot/:botId` timelines (default `50`) |
+| `REVALIDATE_URL`      | no       | Site `/revalidate` endpoint; enables revalidation  |
+| `REVALIDATE_TOKEN`    | no       | Shared secret sent to `REVALIDATE_URL`             |
 
 Which bots to monitor and whether each one alerts is configured in
 `botTargets` in [src/config.ts](src/config.ts) — not env vars.
@@ -129,14 +132,26 @@ reloads the TypeScript source as you edit it. The `dev` script uses
 - `GET http://localhost:3000/health` — liveness probe; returns `HealthResponse`
 - `GET http://localhost:3000/bots` — profiles + latest + uptime % + merged status timeline (first 10) for all bots; returns `BotsResponse`
 - `GET http://localhost:3000/watchdog` — current watchdog state, offline ranges, and shard reconnect times; returns `WatchdogResponse`
-- `GET http://localhost:3000/bot/:botId` — one bot's profile + latest + uptime % + merged status timeline, 50 per page; returns `BotStatusResponse`
+- `GET http://localhost:3000/bot/:botId` — one bot's profile + latest + uptime % + merged status timeline, `PAGE_SIZE` (default 50) per page; returns `BotStatusResponse`
 - `GET http://localhost:3000/bot/:botId?page=2` — next page of the merged status timeline
+- `GET http://localhost:3000/bot/:botId/pages` — pagination metadata only (`total`, `total_pages`, `first_page_index`, `page_size`) — cheap enough to poll for cache planning; returns `BotPagesResponse`
 
 Replace `:botId` with a real configured bot ID. Both bot timelines are
 **count-bounded**: `/bots` shows the 10 most recent merged marks (no pagination),
-`/bot/:botId` pages through all of them 50 at a time via `?page=`; neither is
+`/bot/:botId` pages through all of them `PAGE_SIZE` at a time via `?page=`; neither is
 bounded by time. Successful JSON responses use HTTP
 `200`. Unknown bot IDs return HTTP `404` with `{ error: string }`.
+
+When `REVALIDATE_URL` and `REVALIDATE_TOKEN` are set, the watchdog pushes site
+cache invalidation. Every time a new presence mark lands for a bot (presence
+update, startup re-seed, or shard-reconnect re-seed) it `POST`s `{ token,
+REVALIDATE_TOKEN, tag: "bot-<id>" }` to `REVALIDATE_URL`. Afterward it recomputes the
+bot's `total_pages`; if the page count changed versus the last known value it also
+`POST`s `{ token, tag: "bot-<id>-pages" }`. Posting is fire-and-forget and never
+affects check/heartbeat timing. `/bot/:botId/pages` returns the exact page metadata
+(`PAGE_SIZE`-sized) so the site can cache a single page only when the surrounding
+pages stay stable. Typically the same Next.js handler as the GitHub Actions
+`/revalidate` workflow below:
 
 ### API types + usage
 

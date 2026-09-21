@@ -281,20 +281,12 @@ export interface BotStatusTimelinePage {
 }
 
 /**
- * Merged, deduped, paginated status timeline for one bot: real presence marks interleaved with
- * synthetic watchdog boundary marks (`"${cause} offline"` at each offline range start, `"${cause}
- * online"` at its end). Works on the bot's retained history (entry-count capped, not time-bounded):
- * entries are sorted chronologically, consecutive identical statuses are collapsed, and the newest
- * `pageSize` marks for the requested page are returned (recent-first).
- * Uptime % is over the bot's retained history span — from its oldest kept mark to now — with
- * watchdog-down ranges excluded as unknown time; synthetic marks are never treated as
- * uptime-relevant.
+ * Shared core for a bot's merged + deduped timeline (real presence marks interleaved with
+ * synthetic watchdog boundary marks — `"${cause} offline"` at each offline range start,
+ * `"${cause} online"` at its end) plus uptime % over the retained history span. The deduped
+ * list drives both the paginated timeline response and the lightweight /pages metadata.
  */
-export async function get_bot_status_timeline(
-  botId: string,
-  pageSize: number,
-  page: number,
-): Promise<BotStatusTimelinePage> {
+async function build_merged_timeline(botId: string): Promise<{ deduped: StatusMark[]; uptime_pct: number }> {
   const results = await read_json(history_file_path(botId), [] as PresenceHistoryEntry[]);
   const windowEnd = new Date();
   const windowStart = results.length > 0 ? new Date(results[0]!.timestamp) : windowEnd;
@@ -322,6 +314,44 @@ export async function get_bot_status_timeline(
     if (last && last.status === mark.status) continue;
     deduped.push(mark);
   }
+
+  return { deduped, uptime_pct };
+}
+
+/**
+ * Pagination metadata for a bot's timeline (no timeline payload): total marks, total pages at
+ * `pageSize`, and the base page index. Cheap enough to poll (used by the site's client to know
+ * when a bot's page count changes, without fetching a whole page).
+ */
+export async function get_bot_timeline_pages(
+  botId: string,
+  pageSize: number,
+): Promise<{ total: number; total_pages: number; first_page_index: 1; page_size: number }> {
+  const { deduped } = await build_merged_timeline(botId);
+  return {
+    total: deduped.length,
+    total_pages: Math.ceil(deduped.length / pageSize),
+    first_page_index: 1 as const,
+    page_size: pageSize,
+  };
+}
+
+/**
+ * Merged, deduped, paginated status timeline for one bot: real presence marks interleaved with
+ * synthetic watchdog boundary marks (`"${cause} offline"` at each offline range start, `"${cause}
+ * online"` at its end). Works on the bot's retained history (entry-count capped, not time-bounded):
+ * entries are sorted chronologically, consecutive identical statuses are collapsed, and the newest
+ * `pageSize` marks for the requested page are returned (recent-first).
+ * Uptime % is over the bot's retained history span — from its oldest kept mark to now — with
+ * watchdog-down ranges excluded as unknown time; synthetic marks are never treated as
+ * uptime-relevant.
+ */
+export async function get_bot_status_timeline(
+  botId: string,
+  pageSize: number,
+  page: number,
+): Promise<BotStatusTimelinePage> {
+  const { deduped, uptime_pct } = await build_merged_timeline(botId);
 
   const safePage = Math.max(1, Math.floor(page) || 1);
   const recentFirst = deduped.reverse();

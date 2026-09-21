@@ -1,4 +1,4 @@
-import { botTargets, watchdogConfig } from "../config";
+import { botTargets, botTimelinePageSize, watchdogConfig } from "../config";
 
 function required(name: string): string {
   const value = process.env[name];
@@ -27,6 +27,11 @@ export const config = {
   guildId: required("GUILD_ID"),
   checkIntervalMs: int("CHECK_INTERVAL_MS", watchdogConfig.heartbeatIntervalMs),
   port: int("PORT", 3000),
+  pageSize: int("PAGE_SIZE", botTimelinePageSize),
+  // Site revalidation: when set, /revalidate (REVALIDATE_URL) is POSTed with REVALIDATE_TOKEN
+  // and a tag after presence marks and total_pages changes. Unset disables revalidation.
+  revalidateUrl: optional("REVALIDATE_URL"),
+  revalidateToken: optional("REVALIDATE_TOKEN"),
   isProduction,
   // Keep startup and status alerts separate per environment so local dev runs
   // don't spam the real channel.

@@ -2,6 +2,7 @@ import { config } from "./lib/config"
 import { client, get_pre_outage_latest, is_collecting_replay, is_gateway_connected, normalize_presence_status, start_bot } from "./lib/bot"
 import { start_server } from "./lib/server"
 import { append_result, append_watchdog_heartbeat, clear_last_alert, get_last_alert, get_latest_for, set_last_alert } from "./lib/cache"
+import { bump_bot, seed_pages_baselines } from "./lib/revalidate"
 import type { Presence } from "discord.js"
 import type { HealthCheckResult, PresenceStatus } from "./lib/types"
 
@@ -28,6 +29,7 @@ async function main() {
   await start_bot(handle_presence_update, handle_initial_statuses)
   start_server()
   console.log(`[server] listening on port ${ config.port }`)
+  await seed_pages_baselines(config.botIds).catch((err) => console.error("[revalidate] baseline seed failed:", err))
 
   // First heartbeat fires from the startup sequence (after presence data is read);
   // this just keeps the interval going afterward.
@@ -65,6 +67,10 @@ async function handle_presence_update(presence: Presence): Promise<void> {
   console.log(`[presence] bot=${ botId } status=${ result.status }${ replayed ? " (replayed)" : "" }`)
   await append_watchdog_heartbeat()
   await post_status_alert(botId, result, previous?.status ?? null)
+
+  // A real presence mark just landed → tell the site to invalidate this bot's cached pages.
+  // Fire-and-forget; never affects heartbeat/alert timing.
+  if (result.status !== "unknown") void bump_bot(botId)
 }
 
 async function handle_initial_statuses(
@@ -106,6 +112,7 @@ async function handle_initial_statuses(
     if (!result) continue
     await append_result(botId, { ...result, timestamp })
     console.log(`[bot] startup status bot=${ botId } status=${ result.status }`)
+    if (result.status !== "unknown") void bump_bot(botId)
   }
   await post_startup_messages(initial, origin, changed)
 }

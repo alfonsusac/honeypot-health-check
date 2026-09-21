@@ -87,6 +87,17 @@ export type BotStatusResponse = BotStatus & {
   total: number;
 };
 
+// Pagination metadata for a bot's timeline — no timeline payload. Cheap enough to
+// poll; the site uses it to know when the number of pages changes (the watchdog
+// separately POSTs a "bot-<id>-pages" revalidate tag on that change).
+export type BotPagesResponse = {
+  botId: string;
+  total: number;
+  total_pages: number;
+  first_page_index: 1;
+  page_size: number;
+};
+
 export type ApiError = {
   error: string;
 };
@@ -108,3 +119,6 @@ const pageUrl = new URL(`/bot/${botId}`, process.env.DATA_URL)
 pageUrl.searchParams.set("page", "2")
 const page2Response = await fetch(pageUrl.toString())
 const page2 = await page2Response.json() as BotStatusResponse
+
+const pagesResponse = await fetch(new URL(`/bot/${botId}/pages`, process.env.DATA_URL).toString())
+const pages = await pagesResponse.json() as BotPagesResponse

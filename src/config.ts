@@ -15,3 +15,7 @@ export const botTargets: Record<string, {
 export const watchdogConfig = {
   heartbeatIntervalMs: 150_000,
 } as const;
+
+// Page size for the paginated /bot/:botId timeline. Shared by both the timeline response's
+// page_size and the /bot/:botId/pages metadata so clients can cache pages consistently.
+export const botTimelinePageSize = 50;

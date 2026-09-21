@@ -1,7 +1,8 @@
 import type { Server } from "bun";
 import { config } from "./config";
 import { client, get_monitored_bot_profiles } from "./bot";
-import { get_bot_status_timeline, get_latest_all, get_latest_for, get_watchdog_status } from "./cache";
+import { get_bot_status_timeline, get_bot_timeline_pages, get_latest_all, get_latest_for, get_watchdog_status } from "./cache";
+import { remember_pages } from "./revalidate";
 
 const ENDPOINTS_TEXT = `honeypot-health-check API
 
@@ -9,12 +10,12 @@ GET /                      this list
 GET /health                liveness probe
 GET /watchdog              watchdog heartbeat status + offline ranges
 GET /bots                  profiles + latest + uptime % + merged status timeline (first 10)
-GET /bot/:botId            one bot's profile + latest + uptime % + merged status timeline (50 per page)
+GET /bot/:botId            one bot's profile + latest + uptime % + merged status timeline (${config.pageSize} per page)
 GET /bot/:botId?page=2     next page of the merged status timeline
+GET /bot/:botId/pages      pagination metadata (total, total_pages, page_size) without the timeline
 `;
 
 const STATUS_ALL_PAGE_SIZE = 10;
-const STATUS_BOT_PAGE_SIZE = 50;
 
 function json(body: unknown, status = 200, req?: Request): Response {
   const payload = JSON.stringify(body);
@@ -108,6 +109,17 @@ export function start_server() {
         return json(await get_watchdog_status(), 200, req);
       }
 
+      const pagesMatch = url.pathname.match(/^\/bot\/([^/]+)\/pages$/);
+      if (pagesMatch) {
+        const botId = pagesMatch[1]!;
+        if (!config.botIds.includes(botId)) {
+          return json({ error: `unknown bot_id: ${botId}` }, 404, req);
+        }
+        const { total, total_pages, first_page_index, page_size } = await get_bot_timeline_pages(botId, config.pageSize);
+        remember_pages(botId, total_pages);
+        return json({ botId, total, total_pages, first_page_index, page_size }, 200, req);
+      }
+
       const botMatch = url.pathname.match(/^\/bot\/([^/]+)$/);
       if (botMatch) {
         const botId = botMatch[1]!;
@@ -122,7 +134,7 @@ export function start_server() {
         const latest = await get_latest_for(botId);
         const { uptime_pct, page: resolvedPage, page_size, total_pages, first_page_index, total, timeline } = await get_bot_status_timeline(
           botId,
-          STATUS_BOT_PAGE_SIZE,
+          config.pageSize,
           page,
         );
         return json(
