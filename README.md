@@ -128,6 +128,14 @@ Development does not require Docker. Run it directly with Bun so `bun --watch`
 reloads the TypeScript source as you edit it. The `dev` script uses
 `NODE_ENV=development` and therefore uses `LOG_CHANNEL_ID_DEV`.
 
+Error alerts also go to the same per-environment log channel: any unhandled
+failure across the bot, HTTP API, cache, or revalidation paths posts
+`⚠️ [production|development] <context>: <message>`. Alerts are throttled to one
+message per distinct context per `errorAlertCooldownMs` (default 3 min, in
+[src/config.ts](src/config.ts)) so a recurring failure can't flood the channel.
+If the channel for the active environment is unset, alerts are skipped (the
+`console.error` log remains).
+
 - `GET http://localhost:3000/` — plain-text list of endpoints
 - `GET http://localhost:3000/health` — liveness probe; returns `HealthResponse`
 - `GET http://localhost:3000/bots` — profiles + latest + uptime % + merged status timeline (first 10) for all bots; returns `BotsResponse`

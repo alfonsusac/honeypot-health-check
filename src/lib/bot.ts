@@ -22,6 +22,30 @@ export const client = new Client({
   partials: [ Partials.GuildMember ],
 })
 
+// Error-alert throttling: recurring failures (a per-event heartbeat write error, a downed
+// revalidate endpoint, ...) are collapsed to one message per distinct context per cooldown.
+const last_error_alerts = new Map<string, number>();
+
+export async function post_log(message: string): Promise<void> {
+  if (!config.logChannelId) return
+  try {
+    const channel = await client.channels.fetch(config.logChannelId)
+    if (!channel || !channel.isTextBased() || !("send" in channel)) return
+    await channel.send(message)
+  } catch (error) {
+    console.error("[bot] failed to post log message:", error)
+  }
+}
+
+export function notify_error(context: string, error: unknown, now: number = Date.now()): Promise<void> {
+  const last = last_error_alerts.get(context) ?? 0
+  if (now - last < config.errorAlertCooldownMs) return Promise.resolve()
+  last_error_alerts.set(context, now)
+  const envLabel = config.isProduction ? "production" : "development"
+  const detail = error instanceof Error ? error.message : String(error)
+  return post_log(`⚠️ [${ envLabel }] ${ context }: ${ detail }`)
+}
+
 export async function get_monitored_bot_profiles(): Promise<Array<{
   id: string
   display_name: string | null
@@ -98,8 +122,9 @@ function format_bytes(bytes: number): string {
 function register_commands(): void {
   // Global registration (no guildId): required for user-install commands, and they still appear
   // in every server the app is added to via the GuildInstall integration type.
-  client.application?.commands.set([ health_command, status_command, usages_command ]).catch((error) => {
+  client.application?.commands.set([ health_command, status_command, usages_command ]).catch(async (error) => {
     console.error("[bot] failed to register application commands:", error)
+    await notify_error("failed to register application commands", error)
   })
 }
 
@@ -274,8 +299,9 @@ export async function start_bot(
     register_commands()
     instance_started = true
     gateway_connected = true
-    refresh_presence_and_heartbeat(on_ready, "instance").catch((error) => {
+    refresh_presence_and_heartbeat(on_ready, "instance").catch(async (error) => {
       console.error("[bot] failed to seed initial bot statuses:", error)
+      await notify_error("initial status seed failed", error)
       reject_ready(error)
     }).then(() => {
       resolve_ready()
@@ -289,8 +315,9 @@ export async function start_bot(
     console.log(`[bot] shard resumed after reconnect (replayed ${ replayedEvents } events)`)
     gateway_connected = true
     collecting_replay = true
-    refresh_presence_and_heartbeat(on_ready, "shard", replayedEvents).catch((error) => {
+    refresh_presence_and_heartbeat(on_ready, "shard", replayedEvents).catch(async (error) => {
       console.error("[bot] failed to refresh bot statuses after reconnect:", error)
+      await notify_error("refresh bot statuses after reconnect failed", error)
     }).finally(() => {
       collecting_replay = false
     })
@@ -303,8 +330,9 @@ export async function start_bot(
     if (!instance_started) return
     console.log("[bot] shard re-identified after reconnect")
     collecting_replay = true
-    refresh_presence_and_heartbeat(on_ready, "shard").catch((error) => {
+    refresh_presence_and_heartbeat(on_ready, "shard").catch(async (error) => {
       console.error("[bot] failed to refresh bot statuses after re-identify:", error)
+      await notify_error("refresh bot statuses after re-identify failed", error)
     }).finally(() => {
       collecting_replay = false
     })
@@ -315,27 +343,32 @@ export async function start_bot(
     // Best-effort capture of the pre-outage statuses for the reconnect alert's change diff.
     get_latest_all().then((latest) => {
       pre_outage_latest = latest
-    }).catch((error) => {
+    }).catch(async (error) => {
       console.error("[bot] failed to capture pre-outage statuses:", error)
+      await notify_error("capture pre-outage statuses failed", error)
       pre_outage_latest = null
     })
   })
 
   client.on("interactionCreate", (interaction) => {
-    reply_to_health_command(interaction).catch((error) => {
+    reply_to_health_command(interaction).catch(async (error) => {
       console.error("[bot] failed to handle /health:", error)
+      await notify_error("/health command failed", error)
     })
-    reply_to_status_command(interaction).catch((error) => {
+    reply_to_status_command(interaction).catch(async (error) => {
       console.error("[bot] failed to handle /status:", error)
+      await notify_error("/status command failed", error)
     })
-    reply_to_usages_command(interaction).catch((error) => {
+    reply_to_usages_command(interaction).catch(async (error) => {
       console.error("[bot] failed to handle /usages:", error)
+      await notify_error("/usages command failed", error)
     })
   })
 
   client.on("presenceUpdate", (_oldPresence, newPresence) => {
-    on_presence_update(newPresence).catch((error) => {
+    on_presence_update(newPresence).catch(async (error) => {
       console.error("[bot] failed to handle presence update:", error)
+      await notify_error(`presence update bot=${ newPresence.userId } failed`, error)
     })
   })
 
@@ -348,13 +381,15 @@ export async function start_bot(
       const userId = data.d?.user?.id
       if (userId && config.botIds.includes(userId)) return
     }
-    append_watchdog_heartbeat().catch((error) => {
+    append_watchdog_heartbeat().catch(async (error) => {
       console.error("[bot] failed to write event heartbeat:", error)
+      await notify_error("event heartbeat write failed", error)
     })
   })
 
-  client.on("error", (error) => {
+  client.on("error", async (error) => {
     console.error("[bot] client error:", error)
+    await notify_error("discord client error", error)
   })
 
   await client.login(config.discordToken)

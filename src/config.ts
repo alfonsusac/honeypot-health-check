@@ -25,3 +25,8 @@ export const botTimelinePageSize = 50;
 // keeps its denser heartbeat stream bounded. Enforced in src/lib/cache.ts (append_pruned).
 export const historyEntryCap = 2000;
 export const watchdogHeartbeatCap = 20000;
+
+// Cooldown for Discord error alerts: a recurring failure (e.g. a per-event heartbeat write error,
+// or a downed revalidate endpoint) is collapsed to one message per distinct context per window.
+// Enforced in src/lib/bot.ts (notify_error).
+export const errorAlertCooldownMs = 180_000;

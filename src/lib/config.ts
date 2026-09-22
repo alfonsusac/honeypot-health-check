@@ -1,4 +1,4 @@
-import { botTargets, botTimelinePageSize, historyEntryCap, watchdogConfig, watchdogHeartbeatCap } from "../config";
+import { botTargets, botTimelinePageSize, errorAlertCooldownMs, historyEntryCap, watchdogConfig, watchdogHeartbeatCap } from "../config";
 
 function required(name: string): string {
   const value = process.env[name];
@@ -38,6 +38,7 @@ export const config = {
   logChannelId: isProduction ? optional("LOG_CHANNEL_ID_PROD") : optional("LOG_CHANNEL_ID_DEV"),
   historyEntryCap,
   watchdogHeartbeatCap,
+  errorAlertCooldownMs,
   botTargets,
   botIds: Object.keys(botTargets),
 } as const;

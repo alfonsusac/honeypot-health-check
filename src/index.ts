@@ -1,5 +1,5 @@
 import { config } from "./lib/config"
-import { client, get_pre_outage_latest, is_collecting_replay, is_gateway_connected, normalize_presence_status, start_bot } from "./lib/bot"
+import { client, get_pre_outage_latest, is_collecting_replay, is_gateway_connected, normalize_presence_status, notify_error, start_bot } from "./lib/bot"
 import { start_server } from "./lib/server"
 import { append_result, append_watchdog_heartbeat, clear_last_alert, get_last_alert, get_latest_for, set_last_alert } from "./lib/cache"
 import { bump_bot, seed_pages_baselines } from "./lib/revalidate"
@@ -29,12 +29,18 @@ async function main() {
   await start_bot(handle_presence_update, handle_initial_statuses)
   start_server()
   console.log(`[server] listening on port ${ config.port }`)
-  await seed_pages_baselines(config.botIds).catch((err) => console.error("[revalidate] baseline seed failed:", err))
+  await seed_pages_baselines(config.botIds).catch(async (err) => {
+    console.error("[revalidate] baseline seed failed:", err)
+    await notify_error("revalidate baseline seed failed", err)
+  })
 
   // First heartbeat fires from the startup sequence (after presence data is read);
   // this just keeps the interval going afterward.
   setInterval(() => {
-    run_check_loop().catch((err) => console.error("[healthcheck] loop error:", err))
+    run_check_loop().catch(async (err) => {
+      console.error("[healthcheck] loop error:", err)
+      await notify_error("healthcheck loop error", err)
+    })
   }, config.checkIntervalMs)
 }
 
@@ -110,6 +116,11 @@ async function handle_initial_statuses(
   for (const botId of config.botIds) {
     const result = initial[botId]
     if (!result) continue
+    if (result.status === "unknown" && result.error) {
+      // Data-path failure (startup/re-seed check returned unknown with an error, e.g. "bot not
+      // found in guild"). Throttled per bot via notify_error.
+      void notify_error(`startup presence check bot=${ botId }`, new Error(result.error))
+    }
     await append_result(botId, { ...result, timestamp })
     console.log(`[bot] startup status bot=${ botId } status=${ result.status }`)
     if (result.status !== "unknown") void bump_bot(botId)
@@ -117,8 +128,10 @@ async function handle_initial_statuses(
   await post_startup_messages(initial, origin, changed)
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   console.error("[index] fatal startup error:", err)
+  // Best-effort: the client may not be connected yet, but post_log fails safely when it isn't.
+  await notify_error("fatal startup error", err)
   process.exit(1)
 })
 
@@ -174,6 +187,7 @@ async function post_status_alert(
     else await clear_last_alert(botId)
   } catch (err) {
     console.error(`[index] failed to post status alert for ${ botId }:`, err)
+    await notify_error(`post status alert bot=${ botId } failed`, err)
   }
 }
 
@@ -227,5 +241,6 @@ async function post_startup_messages(
     )
   } catch (err) {
     console.error("[index] failed to post startup message:", err)
+    await notify_error("post startup message failed", err)
   }
 }

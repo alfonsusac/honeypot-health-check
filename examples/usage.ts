@@ -101,6 +101,47 @@ export type BotPagesResponse = {
   page_size: number;
 };
 
+// -- Site revalidation (/revalidate) ------------------------------------------
+
+// The JSON body the watchdog POSTs (application/json) to REVALIDATE_URL whenever
+// a new presence mark lands for a bot. `bot-<id>` fires on every mark write;
+// `bot-<id>-pages` fires only when the merged timeline's total_pages changed.
+// The receiving endpoint must verify `token` and treat only 2xx as success
+// (posting is fire-and-forget; failures are logged, never retried).
+export type RevalidateRequest = {
+  token: string; // REVALIDATE_TOKEN, the shared secret
+  tag: string;   // `bot-<id>` or `bot-<id>-pages`
+};
+
+// Example literal the watchdog sends:
+//   POST https://site.example/revalidate
+//   Content-Type: application/json
+//   { "token": "s3cret", "tag": "bot-1450060292716494940" }
+
+// Response the receiving endpoint should return. The watchdog checks only
+// response.ok, but a structured body is handy for debugging/curl.
+export type RevalidateResponse = {
+  revalidated: boolean;
+  now: number;
+  message?: string;
+};
+
+// Minimal Next.js App Router implementation (src/app/revalidate/route.ts) that
+// accepts the watchdog payload and busts the site's bot-<id> page cache. The
+// site's REVALIDATE_TOKEN environment variable must hold the same value as the
+// watchdog's, so the incoming `token` can be validated.
+//   export async function POST(request: NextRequest) {
+//     const body = (await request.json()) as RevalidateRequest;
+//     if (body.token !== process.env.REVALIDATE_TOKEN) {
+//       return Response.json({ revalidated: false, now: Date.now(), message: "invalid token" }, { status: 401 });
+//     }
+//     if (!body.tag.startsWith("bot-")) {
+//       return Response.json({ revalidated: false, now: Date.now(), message: "unexpected tag" }, { status: 400 });
+//     }
+//     revalidateTag(body.tag); // busts pages cached under this tag
+//     return Response.json({ revalidated: true, now: Date.now() });
+//   }
+
 export type ApiError = {
   error: string;
 };

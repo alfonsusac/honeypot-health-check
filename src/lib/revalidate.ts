@@ -1,5 +1,6 @@
 import { config } from "./config";
 import { get_bot_timeline_pages } from "./cache";
+import { notify_error } from "./bot";
 
 // Process-local baseline of each bot's total_pages, so a pages-growth can be detected after
 // each mark write without re-reading the whole history every time. Seeded at startup and
@@ -16,9 +17,11 @@ async function post_revalidate(tag: string): Promise<void> {
     });
     if (!response.ok) {
       console.error(`[revalidate] ${ tag }: non-OK response ${ response.status }`);
+      await notify_error(`revalidate ${ tag }`, new Error(`non-OK response ${ response.status }`));
     }
   } catch (error) {
     console.error(`[revalidate] failed to revalidate ${ tag }:`, error);
+    await notify_error(`revalidate ${ tag }`, error);
   }
 }
 
@@ -30,6 +33,7 @@ export async function seed_pages_baselines(botIds: string[]): Promise<void> {
       last_total_pages.set(botId, total_pages);
     } catch (error) {
       console.error(`[revalidate] failed to seed pages baseline for ${ botId }:`, error);
+      await notify_error(`revalidate pages baseline seed ${ botId }`, error);
     }
   }
 }
@@ -55,5 +59,6 @@ export async function bump_bot(botId: string): Promise<void> {
     }
   } catch (error) {
     console.error(`[revalidate] failed to track pages for ${ botId }:`, error);
+    await notify_error(`revalidate pages tracking ${ botId }`, error);
   }
 }
