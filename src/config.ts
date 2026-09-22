@@ -19,3 +19,9 @@ export const watchdogConfig = {
 // Page size for the paginated /bot/:botId timeline. Shared by both the timeline response's
 // page_size and the /bot/:botId/pages metadata so clients can cache pages consistently.
 export const botTimelinePageSize = 50;
+
+// Retention caps for the cache history files, by entry count rather than time: bots rarely change
+// presence, so ~2000 entries per bot spans months-to-years of history; the watchdog cap (20000)
+// keeps its denser heartbeat stream bounded. Enforced in src/lib/cache.ts (append_pruned).
+export const historyEntryCap = 2000;
+export const watchdogHeartbeatCap = 20000;

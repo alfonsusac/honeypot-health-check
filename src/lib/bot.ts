@@ -1,7 +1,7 @@
 import { ApplicationIntegrationType, Client, GatewayIntentBits, InteractionContextType, Partials, SlashCommandBuilder } from "discord.js"
 import type { Interaction, Presence, PresenceStatus as DiscordPresenceStatus } from "discord.js"
 import { config } from "./config"
-import { append_watchdog_heartbeat, get_cache_size_bytes, get_latest_all } from "./cache"
+import { append_watchdog_heartbeat, get_cache_size_bytes, get_history_usage, get_latest_all } from "./cache"
 import { get_runtime_memory } from "./runtime"
 import type { HealthCheckResult, PresenceStatus } from "./types"
 
@@ -79,6 +79,10 @@ const status_command = set_install_contexts(new SlashCommandBuilder())
   .setName("status")
   .setDescription("Show the current status of monitored bots")
 
+const usages_command = set_install_contexts(new SlashCommandBuilder())
+  .setName("usages")
+  .setDescription("Show cache history usage (% filled) per bot and the watchdog")
+
 function format_bytes(bytes: number): string {
   if (bytes < 1024) return `${ bytes } B`
   const units = [ "KB", "MB", "GB", "TB" ]
@@ -94,7 +98,7 @@ function format_bytes(bytes: number): string {
 function register_commands(): void {
   // Global registration (no guildId): required for user-install commands, and they still appear
   // in every server the app is added to via the GuildInstall integration type.
-  client.application?.commands.set([ health_command, status_command ]).catch((error) => {
+  client.application?.commands.set([ health_command, status_command, usages_command ]).catch((error) => {
     console.error("[bot] failed to register application commands:", error)
   })
 }
@@ -114,6 +118,21 @@ async function reply_to_health_command(interaction: Interaction): Promise<void> 
   )
 }
 
+async function reply_to_usages_command(interaction: Interaction): Promise<void> {
+  if (!interaction.isChatInputCommand() || interaction.commandName !== "usages") return
+
+  const { bots, watchdog } = await get_history_usage()
+  const botLines = config.botIds.map((botId) => {
+    const usage = bots[botId]!
+    return `<@${ botId }>: ${ usage.entries.toLocaleString() }/${ usage.cap.toLocaleString() } (${ usage.used_pct }%) — ${ format_bytes(usage.bytes) }`
+  })
+  const watchdogLine =
+    `Watchdog heartbeats: ${ watchdog.entries.toLocaleString() }/${ watchdog.cap.toLocaleString() } ` +
+    `(${ watchdog.used_pct }%) — ${ format_bytes(watchdog.bytes) }`
+
+  await interaction.reply(`**Cache usage**\n${ botLines.join("\n") }\n${ watchdogLine }`)
+}
+
 async function reply_to_status_command(interaction: Interaction): Promise<void> {
   if (!interaction.isChatInputCommand() || interaction.commandName !== "status") return
 
@@ -124,7 +143,8 @@ async function reply_to_status_command(interaction: Interaction): Promise<void> 
 
     const latency = result.latency_ms === null ? "n/a" : `${ result.latency_ms }ms`
     const error = result.error ? `\n> ${ result.error }` : ""
-    return `<@${ botId }>: **${ result.status }** | checked ${ result.timestamp } | latency ${ latency }${ error }`
+    const checkedUnix = Math.floor(new Date(result.timestamp).getTime() / 1000)
+    return `<@${ botId }>: **${ result.status }** | checked <t:${ checkedUnix }:R> | latency ${ latency }${ error }`
   })
 
   await interaction.reply(`**Bot status**\n${ lines.join("\n") || "No bots configured" }`)
@@ -307,6 +327,9 @@ export async function start_bot(
     })
     reply_to_status_command(interaction).catch((error) => {
       console.error("[bot] failed to handle /status:", error)
+    })
+    reply_to_usages_command(interaction).catch((error) => {
+      console.error("[bot] failed to handle /usages:", error)
     })
   })
 

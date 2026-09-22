@@ -163,8 +163,13 @@ The Discord `/health` command reports the total size of the local cache and
 the watchdog process's current memory usage (RSS). The command is registered
 for the configured `GUILD_ID` on startup.
 
-The Discord `/status` command reports the latest cached status, check time,
-latency, and errors for each monitored bot.
+The Discord `/status` command reports the latest cached status, check time
+(rendered as a relative timestamp), latency, and errors for each monitored bot.
+
+The Discord `/usages` command reports cache history retention: each bot's
+presence history and the watchdog heartbeat log as `entries/cap (percent
+filled)` plus the current file size on disk, so the caps' margins are visible
+at a glance.
 
 The watchdog writes a heartbeat every `CHECK_INTERVAL_MS` and after every
 gateway event. On startup (`instance`) it waits for guild presence data, then
@@ -204,7 +209,8 @@ chronologically, consecutive identical statuses are collapsed (so repeated
 re-seed `online`s disappear), and the result is listed most recent first. History is retained by **entry count**, not
 by time: each bot keeps up to `historyEntryCap` (2000) presence posts and the
 watchdog keeps up to `watchdogHeartbeatCap` (20000) heartbeats, dropping the
-oldest past the cap — see [src/config.ts](src/config.ts). `/bots` returns the 10
+oldest past the cap — both caps live in [src/config.ts](src/config.ts) and their
+current fill is reported by the `/usages` command. `/bots` returns the 10
 most recent marks per bot (no pagination); `/bot/:botId` pages through all of
 them, 50 per page, via `?page=2` (and so on), echoing `page`, `page_size`,
 `first_page_index`, `total`, and `total_pages` (pages are 1-indexed, so

@@ -1,4 +1,4 @@
-import { botTargets, botTimelinePageSize, watchdogConfig } from "../config";
+import { botTargets, botTimelinePageSize, historyEntryCap, watchdogConfig, watchdogHeartbeatCap } from "../config";
 
 function required(name: string): string {
   const value = process.env[name];
@@ -36,11 +36,8 @@ export const config = {
   // Keep startup and status alerts separate per environment so local dev runs
   // don't spam the real channel.
   logChannelId: isProduction ? optional("LOG_CHANNEL_ID_PROD") : optional("LOG_CHANNEL_ID_DEV"),
-  // Retention is by entry count rather than by time: bots rarely change presence, so ~2000
-  // entries per bot spans months-to-years of history. The watchdog cap keeps its denser
-  // heartbeat stream bounded while predating any bot's retained presence.
-  historyEntryCap: 2000,
-  watchdogHeartbeatCap: 20000,
+  historyEntryCap,
+  watchdogHeartbeatCap,
   botTargets,
   botIds: Object.keys(botTargets),
 } as const;

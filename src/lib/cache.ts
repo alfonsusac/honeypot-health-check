@@ -120,6 +120,30 @@ export async function get_cache_size_bytes(): Promise<number> {
   return total;
 }
 
+/** Retention fill for one history file: entries written vs the cap, plus current size on disk. */
+async function history_usage_for(
+  path: URL,
+  cap: number,
+): Promise<{ entries: number; cap: number; used_pct: number; bytes: number }> {
+  const entries = (await read_json<unknown[]>(path, [])).length;
+  const file = Bun.file(path);
+  const bytes = (await file.exists()) ? file.size : 0;
+  return { entries, cap, used_pct: cap > 0 ? Math.round((entries / cap) * 1000) / 10 : 0, bytes };
+}
+
+/** Cache retention usage for the /usages command: per-bot history files and the watchdog log. */
+export async function get_history_usage(): Promise<{
+  bots: Record<string, { entries: number; cap: number; used_pct: number; bytes: number }>;
+  watchdog: { entries: number; cap: number; used_pct: number; bytes: number };
+}> {
+  const bots: Record<string, { entries: number; cap: number; used_pct: number; bytes: number }> = {};
+  for (const botId of config.botIds) {
+    bots[botId] = await history_usage_for(history_file_path(botId), config.historyEntryCap);
+  }
+  const watchdog = await history_usage_for(history_file_path("watchdog"), config.watchdogHeartbeatCap);
+  return { bots, watchdog };
+}
+
 export async function get_latest_for(botId: string): Promise<HealthCheckResult | null> {
   const latest = await read_latest();
   return latest.bots[botId] ?? null;
