@@ -181,6 +181,9 @@ an offline range from the previous heartbeat to that startup heartbeat. Each
 restart), a `"shard"` gap means the gateway dropped and later reconnected while
 the process stayed up. If a drop ends with a full process restart, the closing
 boundary is the restart's `"instance"` heartbeat, so it is labeled `"instance"`.
+When a shard's drop and reconnect fall in the same millisecond, the gap is
+recorded as a zero-length range (`from === to`) with `kind: "resumed"` — a
+sub-ms session resume with effectively no downtime.
 
 Discord replayed events after a shard reconnect carry no timestamps: posts
 reconciled from the replay are arrival-stamped and flagged `replayed: true`
@@ -193,9 +196,12 @@ The `/bots` and `/bot/:botId` timelines pre-merge the bot's Discord presence
 posts with the `/watchdog` offline ranges: each offline range contributes two
 synthetic marks — `` `${cause} offline` `` at its `from` and `` `${cause} online` ``
 at its `to` (`"instance offline"`/`"instance online"`/`"shard offline"`/`"shard
-online"`). The merged marks are sorted chronologically, consecutive identical
-statuses are collapsed (so repeated re-seed `online`s disappear), and the
-result is listed most recent first. History is retained by **entry count**, not
+online"`). A `kind: "resumed"` range (sub-ms shard reconnect, `from === to`)
+instead contributes a single `"shard resumed"` mark at that instant — a bare
+reconnect with no measurable downtime, shown so reconnects remain visible
+without a meaningless offline/online pair. The merged marks are sorted
+chronologically, consecutive identical statuses are collapsed (so repeated
+re-seed `online`s disappear), and the result is listed most recent first. History is retained by **entry count**, not
 by time: each bot keeps up to `historyEntryCap` (2000) presence posts and the
 watchdog keeps up to `watchdogHeartbeatCap` (20000) heartbeats, dropping the
 oldest past the cap — see [src/config.ts](src/config.ts). `/bots` returns the 10

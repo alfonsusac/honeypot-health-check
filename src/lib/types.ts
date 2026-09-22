@@ -63,10 +63,18 @@ export interface OfflineRange {
   to: string;
   /** What closed the gap: "instance" = process (re)started, "shard" = gateway reconnected after a drop. */
   cause: "instance" | "shard";
+  /** "resumed" when the drop and reconnect fell in the same millisecond (from === to): a sub-ms
+   * session resume with effectively no downtime, rendered as a single mark rather than a gap. */
+  kind: "range" | "resumed";
 }
 
 /** Synthetic statuses injected into bot timelines from /watchdog offline ranges when merged. */
-export type WatchdogActivityStatus = "instance offline" | "instance online" | "shard offline" | "shard online";
+export type WatchdogActivityStatus =
+  | "instance offline"
+  | "instance online"
+  | "shard resumed"
+  | "shard offline"
+  | "shard online";
 
 /** A timeline mark's status: a real Discord presence, or a synthetic watchdog boundary. */
 export type MergedStatus = PresenceStatus | WatchdogActivityStatus;

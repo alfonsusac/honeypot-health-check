@@ -32,6 +32,7 @@ export type MergedStatus =
   | PresenceStatus
   | "instance offline"
   | "instance online"
+  | "shard resumed"
   | "shard offline"
   | "shard online";
 
@@ -70,6 +71,8 @@ export type WatchdogResponse = {
     to: string;
     // "instance" = process (re)started; "shard" = gateway reconnected after a drop.
     cause: "instance" | "shard";
+    // "resumed" = a sub-ms shard reconnect (from === to), shown as one "shard resumed" mark.
+    kind: "range" | "resumed";
   }>;
   // Times the gateway shard reconnected after a drop (purely informational, not
   // reconciled with bot uptime; replayed events carry no timestamps).

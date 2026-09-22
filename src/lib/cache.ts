@@ -166,13 +166,14 @@ function compute_offline_ranges(
   for (let i = 1; i < heartbeats.length; i++) {
     const previous = heartbeats[i - 1]!;
     const currentHeartbeat = heartbeats[i]!;
-    if (!currentHeartbeat.startup || currentHeartbeat.timeMs <= previous.timeMs) continue;
+    if (!currentHeartbeat.startup || currentHeartbeat.timeMs < previous.timeMs) continue;
     const fromMs = previous.timeMs;
-    if (currentHeartbeat.timeMs <= fromMs) continue;
+    if (currentHeartbeat.timeMs < fromMs) continue;
     offlines.push({
       from: new Date(fromMs).toISOString(),
       to: new Date(currentHeartbeat.timeMs).toISOString(),
       cause: currentHeartbeat.startup === "shard" ? "shard" : "instance",
+      kind: currentHeartbeat.timeMs === fromMs ? "resumed" : "range",
     });
   }
 
@@ -301,6 +302,10 @@ async function build_merged_timeline(botId: string): Promise<{ deduped: StatusMa
 
   const merged: StatusMark[] = [...marks];
   for (const offline of compute_offline_ranges(heartbeats)) {
+    if (offline.kind === "resumed") {
+      merged.push({ status: "shard resumed" as const, time: offline.from });
+      continue;
+    }
     merged.push({ status: `${offline.cause} offline` as const, time: offline.from });
     merged.push({ status: `${offline.cause} online` as const, time: offline.to });
   }
