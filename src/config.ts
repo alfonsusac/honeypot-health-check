@@ -1,7 +1,7 @@
 export const botTargets: Record<string, {
-  author: string;
-  support_server: string;
-  should_ping: boolean;
+  author: string
+  support_server: string
+  should_ping: boolean
 }> = {
   "1450060292716494940": { author: "risky", support_server: "https://discord.com/servers/riskys-server-894705593087049729", should_ping: true },
   "1491864770490532061": { author: "risky", support_server: "https://discord.com/servers/riskys-server-894705593087049729", should_ping: true },
@@ -15,19 +15,19 @@ export const botTargets: Record<string, {
 }
 export const watchdogConfig = {
   heartbeatIntervalMs: 150_000,
-} as const;
+} as const
 
 // Page size for the paginated /bot/:botId timeline. Shared by both the timeline response's
 // page_size and the /bot/:botId/pages metadata so clients can cache pages consistently.
-export const botTimelinePageSize = 50;
+export const botTimelinePageSize = 50
 
 // Retention caps for the cache history files, by entry count rather than time: bots rarely change
 // presence, so ~2000 entries per bot spans months-to-years of history; the watchdog cap (20000)
 // keeps its denser heartbeat stream bounded. Enforced in src/lib/cache.ts (append_pruned).
-export const historyEntryCap = 2000;
-export const watchdogHeartbeatCap = 20000;
+export const historyEntryCap = 2000
+export const watchdogHeartbeatCap = 20000
 
 // Cooldown for Discord error alerts: a recurring failure (e.g. a per-event heartbeat write error,
 // or a downed revalidate endpoint) is collapsed to one message per distinct context per window.
 // Enforced in src/lib/bot.ts (notify_error).
-export const errorAlertCooldownMs = 180_000;
+export const errorAlertCooldownMs = 180_000
